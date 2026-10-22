@@ -1,4 +1,4 @@
-# 拼音输入法(自研原型)
+# 拼音输入法(自研原型) · 水杉
 
 一个纯 Python 的全拼输入法: 词格 DAG + Viterbi 整句解码引擎 + 神经重排序,
 两种前端——Tkinter 打字板与**全局键盘钩子模式**(任意应用里打字)。
@@ -8,6 +8,11 @@
 (8105 单字 / 53.6 万词条); 评测集与重排序模型来自
 [chinese-ime-lm](https://github.com/metasequoiaime/chinese-ime-lm)(MIT 语料,
 模型 Apache-2.0)。
+
+**许可分层**: 代码 MIT; `dicts/*.yaml` 词表为 rime-ice 的 GFDL 1.3;
+模型权重 Apache-2.0——详见 [LICENSE](LICENSE) 与
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。发布包见
+[Releases](../../releases)。
 
 ## 快速开始
 
