@@ -22,8 +22,8 @@ class InputController:
     """按键 -> 编码缓冲 / 候选 / 上屏 的状态机。"""
 
     def __init__(self, engine=None, use_reranker=True, learn=True, model_path=None,
-                 user_path=None, auto_space=False, space_digits=False):
-        self.engine = engine or Engine(learn=learn, user_path=user_path)
+                 user_path=None, auto_space=False, space_digits=False, fuzzy=True):
+        self.engine = engine or Engine(learn=learn, user_path=user_path, fuzzy=fuzzy)
         self.auto_space = auto_space      # 盘古之白, 默认关闭(需求已取消)
         self.space_digits = space_digits
         self.reranker_on = False

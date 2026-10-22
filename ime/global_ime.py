@@ -385,9 +385,11 @@ class KeyboardHook:
 
 class GlobalIme:
     def __init__(self, selftest=False, model_path=None, user_path=None,
-                 auto_space=False, space_digits=False, ui_settings_path=None):
+                 auto_space=False, space_digits=False, ui_settings_path=None,
+                 fuzzy=True):
         self.controller = InputController(model_path=model_path, user_path=user_path,
-                                          auto_space=auto_space, space_digits=space_digits)
+                                          auto_space=auto_space, space_digits=space_digits,
+                                          fuzzy=fuzzy)
         self.state = {"enabled": False, "buffer": "", "shift_armed": False}
         self.events = queue.Queue()
         self.hook = KeyboardHook(self.events, self.state, allow_injected=selftest)
@@ -548,19 +550,20 @@ class GlobalIme:
         status.configure(text=status_text, anchor="w")
         status.pack(fill="x", pady=(0, 2))
 
-        # 预编辑行: 拼音(绿灰) + 最优预览(亮白)
+        # 预编辑行: 拼音(紫灰, 音节 ' 分隔) + 最优预览(亮白)
         first = page_cands[0][1].preview if page_cands else ""
         if buf:
             pre_row = tk.Frame(self.rows, bg=self.C_BG)
             pre_row.pack(fill="x")
-            tk.Label(pre_row, text=buf, font=f_pre, fg=self.C_PINYIN,
+            py_disp = page_cands[0][1].pinyin if page_cands and page_cands[0][1].pinyin else buf
+            tk.Label(pre_row, text=py_disp, font=f_pre, fg=self.C_PINYIN,
                      bg=self.C_BG).pack(side="left")
             if first:
                 tk.Label(pre_row, text="  " + first, font=f_pre,
                          fg=self.C_TEXT, bg=self.C_BG).pack(side="left")
 
         # 尺寸: 先量后画——底板宽度必须用本轮内容算出
-        pre_w = f_pre.measure(buf + "  " + first) + 8 if buf else 0
+        pre_w = f_pre.measure((page_cands[0][1].pinyin if page_cands and page_cands[0][1].pinyin else buf) + "  " + first) + 8 if buf else 0
         status_w = f_status.measure(status_text) + 8
         pill_boxes = []
         for abs_idx, cand in page_cands:

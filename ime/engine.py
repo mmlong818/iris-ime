@@ -9,6 +9,7 @@
 
 import math
 import pickle
+import time
 from bisect import bisect_left
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -32,6 +33,7 @@ class Candidate:
     preview: str     # 整个缓冲的解码预览
     score: float
     kind: str = ""   # 首段边的来源: word/char(词典精确) partial(末音节补全) initial(简拼)
+    pinyin: str = "" # 整句拼音, 音节以 ' 分隔(ni'hao); 未知切分(如自造词)为原始字母
 
 
 @dataclass
@@ -109,9 +111,15 @@ class Engine:
                 self.user_counts = data.get("words", {})
             except (json.JSONDecodeError, OSError):
                 self.user_counts = {}
-        for text, rec in self.user_counts.items():
+        now = time.time()
+        for text, rec in list(self.user_counts.items()):
+            eff = self._effective_count(rec, now)
+            if eff < 0.3:  # 约 90 天未用且次数低: 遗忘
+                del self.user_counts[text]
+                continue
+            rec["eff"] = eff
             key = rec.get("key", "")
-            self.user_by_key.setdefault(key, {})[text] = rec.get("count", 1)
+            self.user_by_key.setdefault(key, {})[text] = eff
 
     def _save_user(self):
         import json
@@ -131,27 +139,36 @@ class Engine:
         rec = self.user_counts.get(text)
         if rec is not None and rec.get("key") == key:
             rec["count"] = min(rec.get("count", 1) + 1, 100)
+            rec["last"] = time.time()
         elif rec is None:
             if len(self.user_counts) >= 20000:
                 return
-            self.user_counts[text] = {"key": key, "count": 1}
+            self.user_counts[text] = {"key": key, "count": 1, "last": time.time()}
+            rec = self.user_counts[text]
         else:
             return  # 同文本换过键, 不动
-        self.user_by_key.setdefault(key, {})[text] = self.user_counts[text]["count"]
+        self.user_by_key.setdefault(key, {})[text] = self._effective_count(rec)
         self._save_user()
 
+    @staticmethod
+    def _effective_count(rec, now=None):
+        """时间衰减后的有效次数: 半衰期 30 天。"""
+        now = now if now is not None else time.time()
+        days = max(0.0, (now - rec.get("last", now)) / 86400)
+        return max(rec.get("count", 1) * 0.5 ** (days / 30), 0.1)
+
     def _user_edges(self, key):
-        """用户学到的词条按高权词典边参与精确匹配。"""
+        """用户学到的词条: {文本: 有效次数(已按时间衰减)}。"""
         return self.user_by_key.get(key, {})
 
     # ---------- 边收集 ----------
 
     def _word_edges(self, key):
-        """key 对应的词条: [(词, 权重, 音节数)]。"""
+        """key 对应的词条: [(词, 权重, 音节数, 拼音串)]。"""
         lst = self.word_by_pinyin.get(key)
         if not lst:
             return []
-        return [(w, wt, py.count(" ") + 1) for w, wt, py in lst]
+        return [(w, wt, py.count(" ") + 1, py) for w, wt, py in lst]
 
     def _prefix_words(self, prefix):
         """把 prefix 补全成完整词条的候选: [(词, 权重, 音节数)]。
@@ -170,7 +187,7 @@ class Engine:
             last_len = len(py.split()[-1])
             if len(k) - len(prefix) >= last_len:
                 continue  # 差距超过最后一个音节, 非法补全
-            out.append((w, wt, py.count(" ") + 1))
+            out.append((w, wt, py.count(" ") + 1, py))
             if len(out) >= 32:
                 break
         out.sort(key=lambda x: -x[1])
@@ -228,23 +245,23 @@ class Engine:
                 # 用户学过的词条最先入格并占定文本位, 同文本的词典低频边被
                 # seen 挡掉——否则 base.dict 里的同名低频词条(如李敏 w=800)
                 # 会把高权用户边挤掉
-                for utext, count in self._user_edges(key).items():
+                for utext, eff in self._user_edges(key).items():
                     if utext not in seen:
                         seen.add(utext)
-                        wt = 1000000.0 * count
+                        wt = 1000000.0 * max(eff, 0.1)
                         bucket.append((j, utext, self.log(wt)
                                        + self.word_bonus * (len(utext) - 1)
-                                       - self.char_penalty, "word"))
-                for w, wt, nsyl in self._word_edges(key)[:WORD_EDGE_CAP]:
+                                       - self.char_penalty, "word", key))
+                for w, wt, nsyl, py in self._word_edges(key)[:WORD_EDGE_CAP]:
                     if w not in seen:
                         seen.add(w)
                         bucket.append((j, w, self.log(wt) + self.word_bonus * (nsyl - 1)
-                                       - self.char_penalty, "word"))
+                                       - self.char_penalty, "word", py))
                 if j - i <= 6:  # 单字音节最长 6 个字母(zhuang)
                     for ch, wt in self.pinyin_chars.get(key, [])[:CHAR_EDGE_CAP]:
                         if ch not in seen:
                             seen.add(ch)
-                            bucket.append((j, ch, self.log(wt) - self.char_penalty, "char"))
+                            bucket.append((j, ch, self.log(wt) - self.char_penalty, "char", key))
                 # 模糊音: 规范形键查询(精确命中已占文本位, 模糊带罚分补位)
                 for ck in self._canon_keys(key, canon_memo):
                     for w, wt, py in self.canon_words.get(ck, [])[:WORD_EDGE_CAP]:
@@ -252,25 +269,25 @@ class Engine:
                             seen.add(w)
                             nsyl = py.count(" ") + 1
                             bucket.append((j, w, self.log(wt) + self.word_bonus * (nsyl - 1)
-                                           - self.char_penalty - self.fuzzy_penalty, "word"))
+                                           - self.char_penalty - self.fuzzy_penalty, "word", py))
                     if j - i <= 6:
                         for ch, wt in self.canon_chars.get(ck, [])[:CHAR_EDGE_CAP]:
                             if ch not in seen:
                                 seen.add(ch)
                                 bucket.append((j, ch, self.log(wt) - self.char_penalty
-                                               - self.fuzzy_penalty, "char"))
+                                               - self.fuzzy_penalty, "char", key))
             rem = P[i:]
             if len(rem) <= MAX_SPAN and rem not in self.word_by_pinyin:
-                for w, wt, nsyl in self._prefix_words(rem)[:WORD_EDGE_CAP]:
+                for w, wt, nsyl, py in self._prefix_words(rem)[:WORD_EDGE_CAP]:
                     bucket.append((n, w, self.log(wt) - self.char_penalty
-                                   - self.partial_penalty, "partial"))
+                                   - self.partial_penalty, "partial", py))
                 for ch, wt in self._prefix_chars(rem)[:CHAR_EDGE_CAP]:
                     bucket.append((n, ch, self.log(wt) - self.char_penalty
-                                   - self.partial_penalty, "partial"))
+                                   - self.partial_penalty, "partial", key))
             if 2 <= len(rem) <= 8:
                 for w, wt in self.initial_words.get(rem, [])[:WORD_EDGE_CAP]:
                     bucket.append((n, w, self.log(wt) - self.char_penalty
-                                   - self.initial_penalty, "initial"))
+                                   - self.initial_penalty, "initial", key))
         return edges_from
 
     # ---------- 解码 ----------
@@ -293,7 +310,7 @@ class Engine:
         for i in range(n):
             if best[i] == NEG:
                 continue
-            for end, text, score, _kind in edges_from[i]:
+            for end, text, score, _kind, _syls in edges_from[i]:
                 s = best[i] + score
                 if s > best[end]:
                     best[end], back[end] = s, (i, text)
@@ -330,15 +347,15 @@ class Engine:
                 src = paths[i]
                 if not src:
                     continue
-                for end, text, score, kind in edges_from[i]:
+                for end, text, score, kind, syls in edges_from[i]:
                     if end != j:
                         continue
                     for sc, edges in src:
-                        merged.append((sc + score, edges + ((text, end, kind),)))
+                        merged.append((sc + score, edges + ((text, end, kind, syls),)))
             merged.sort(key=lambda x: -x[0])
             seen = set()
             for item in merged:
-                key = "".join(t for t, _, _ in item[1])
+                key = "".join(t for t, _, _, _ in item[1])
                 if key in seen:
                     continue
                 seen.add(key)
@@ -355,19 +372,20 @@ class Engine:
         GROUP_CAP = 4
         entries = []
         for rank, (sc, edges) in enumerate(paths[target]):
-            preview = "".join(t for t, _, _ in edges)
+            preview = "".join(t for t, _, _, _ in edges)
+            pinyin = "'".join(" ".join(s for _, _, _, s in edges).split())
             group = (edges[0][0], edges[0][1])
             if rank == 0 or len(edges) < 2:
                 entries.append((sc, edges[0][1], edges[0][0], edges[0][2],
-                                preview, group))
+                                preview, group, pinyin))
             else:
                 entries.append((sc, edges[1][1],
                                 edges[0][0] + edges[1][0], edges[0][2],
-                                preview, group))
+                                preview, group, pinyin))
         entries.sort(key=lambda e: -e[0])
         seen = set()
         group_count = {}
-        for sc, end, text, kind, preview, group in entries:
+        for sc, end, text, kind, preview, group, pinyin in entries:
             dedup = (preview, text, end)
             if dedup in seen:
                 continue
@@ -377,7 +395,7 @@ class Engine:
             group_count[group] = group_count.get(group, 0) + 1
             result.candidates.append(
                 Candidate(text=text, commit_end=end, preview=preview,
-                          score=sc, kind=kind))
+                          score=sc, kind=kind, pinyin=pinyin))
             if len(result.candidates) >= MAX_CANDIDATES:
                 break
         if self.reranker is not None and result.remainder == "":

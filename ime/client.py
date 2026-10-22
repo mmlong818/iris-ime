@@ -12,6 +12,7 @@
 自检: python -m ime.client --selftest
 """
 
+import json
 import os
 import queue
 import sys
@@ -28,6 +29,19 @@ from . import __version__
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_NAME = "PinyinIME"
 MODELS = {"4M": "sentence-model-4m.safetensors", "25M": "sentence-model-25m.safetensors"}
+
+
+def load_settings():
+    path = app_data_dir() / "settings.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_settings(settings):
+    path = app_data_dir() / "settings.json"
+    path.write_text(json.dumps(settings, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def app_data_dir():
@@ -63,8 +77,10 @@ def tray_image(engaged=False):
 
 class WinClient(GlobalIme):
     def __init__(self):
+        self.settings = {"fuzzy": True, **load_settings()}
         super().__init__(user_path=app_data_dir() / "user_words.json",
-                         ui_settings_path=app_data_dir() / "ui.json")
+                         ui_settings_path=app_data_dir() / "ui.json",
+                         fuzzy=self.settings.get("fuzzy", True))
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
@@ -82,6 +98,8 @@ class WinClient(GlobalIme):
                              radio=True, checked=lambda item: self.model_name == "4M"),
             pystray.MenuItem("用 25M(准, 较慢)", lambda: self._menu_model("25M"),
                              radio=True, checked=lambda item: self.model_name == "25M"),
+            pystray.MenuItem("模糊音", self._menu_fuzzy,
+                             checked=lambda item: self.controller.engine.fuzzy),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("开机自启", self._menu_autostart,
                              checked=lambda item: autostart_enabled()),
@@ -99,6 +117,9 @@ class WinClient(GlobalIme):
 
     def _menu_model(self, name):
         self.events.put(("model", name, ""))
+
+    def _menu_fuzzy(self, icon, item):
+        self.events.put(("fuzzy", None, ""))
 
     def _menu_autostart(self, icon, item):
         set_autostart(not autostart_enabled(), exe_path())
@@ -161,6 +182,11 @@ class WinClient(GlobalIme):
                 if kind == "toggle":
                     self.state["enabled"] = not self.state["enabled"]
                     self._toast_until = time.time() + 0.9
+                    toggled = True
+                elif kind == "fuzzy":
+                    self.controller.engine.fuzzy = not self.controller.engine.fuzzy
+                    self.settings["fuzzy"] = self.controller.engine.fuzzy
+                    save_settings(self.settings)
                     toggled = True
                 elif kind == "model":
                     self._apply_model(arg)
