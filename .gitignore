@@ -1,0 +1,18 @@
+# 构建产物
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+
+# 用户数据(运行时生成)
+data/user_words.json
+
+# 派生缓存(可用 build_cache.py 重建, 32MB 不入库)
+dicts/cache.pkl
+
+# 实验残留
+ime/_exp.py
+ime/_engine_exp.py
