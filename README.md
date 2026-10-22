@@ -6,8 +6,9 @@
 
 词库基于 [rime-ice](https://github.com/gaboolic/rime-ice) 的字表与基础词库
 (8105 单字 / 53.6 万词条); 评测集与重排序模型来自
-[chinese-ime-lm](https://github.com/metasequoiaime/chinese-ime-lm)(MIT 语料,
-模型 Apache-2.0)。
+[chinese-ime-lm](https://github.com/metasequoiaime/chinese-ime-lm)
+(词级评测集上游为微软 SampleIME 示例词库 MIT, 整句评测集为其原创,
+模型 Apache-2.0——详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md))。
 
 **许可分层**: 代码 MIT; `dicts/*.yaml` 词表为 rime-ice 的 GFDL 1.3;
 模型权重 Apache-2.0——详见 [LICENSE](LICENSE) 与
