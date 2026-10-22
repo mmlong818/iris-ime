@@ -15,11 +15,13 @@
 避免自反馈; 钩子异常时立即摘除。
 """
 
+import json
 import queue
 import sys
 import threading
 import time
 import tkinter as tk
+from pathlib import Path
 
 import ctypes
 from ctypes import wintypes
@@ -383,7 +385,7 @@ class KeyboardHook:
 
 class GlobalIme:
     def __init__(self, selftest=False, model_path=None, user_path=None,
-                 auto_space=False, space_digits=False):
+                 auto_space=False, space_digits=False, ui_settings_path=None):
         self.controller = InputController(model_path=model_path, user_path=user_path,
                                           auto_space=auto_space, space_digits=space_digits)
         self.state = {"enabled": False, "buffer": "", "shift_armed": False}
@@ -420,6 +422,23 @@ class GlobalIme:
         self._win_w, self._win_h = 380, 60
         self._seen_output = 0
         self._toast_until = 0.0   # 中英切换大字提示的截止时刻
+
+        # 闲置停靠位: 用户可拖动状态条, 位置持久化; 组词时仍跟随光标
+        self._ui_settings_path = ui_settings_path
+        self._idle_pos = None
+        self._drag = None
+        self._dragging = False
+        if ui_settings_path and Path(ui_settings_path).exists():
+            try:
+                pos = json.loads(Path(ui_settings_path).read_text(encoding="utf-8")).get("idle_pos")
+                if isinstance(pos, list) and len(pos) == 2:
+                    self._idle_pos = (int(pos[0]), int(pos[1]))
+            except (json.JSONDecodeError, OSError, ValueError):
+                pass
+        self.canvas.configure(cursor="fleur")
+        self.root.bind("<Button-1>", self._drag_start)
+        self.root.bind("<B1-Motion>", self._drag_motion)
+        self.root.bind("<ButtonRelease-1>", self._drag_end)
         self._caret_ts = 0.0      # 光标查询节流
         self._last_anchor = None  # 最近一次光标位置 (x, y_bottom, y_top)
         self._last_geo = ""
@@ -455,6 +474,37 @@ class GlobalIme:
         self.controller._select(abs_idx)
         self._flush_output()
         self._render()
+
+    def _drag_start(self, event):
+        if self.controller.buffer or self._drag is not None:
+            return  # 组词中跟随光标, 不拖
+        if event.widget is self.canvas:
+            for item in self.canvas.find_withtag("current"):
+                if "cand" in self.canvas.gettags(item):
+                    return  # 药丸点击交给选词
+        self._drag = (event.x_root - self.root.winfo_x(),
+                      event.y_root - self.root.winfo_y())
+
+    def _drag_motion(self, event):
+        if self._drag is None:
+            return
+        self._dragging = True
+        nx = event.x_root - self._drag[0]
+        ny = event.y_root - self._drag[1]
+        self.root.geometry(f"+{nx}+{ny}")
+        self._idle_pos = (nx, ny)
+
+    def _drag_end(self, event):
+        if self._drag is None:
+            return
+        self._drag = None
+        self._dragging = False
+        if self._ui_settings_path and self._idle_pos:
+            try:
+                Path(self._ui_settings_path).write_text(
+                    json.dumps({"idle_pos": list(self._idle_pos)}), encoding="utf-8")
+            except OSError:
+                pass
 
     def _render(self):
         import tkinter.font as tkfont
@@ -562,9 +612,11 @@ class GlobalIme:
                     font=f_cand, fill=self.C_ACCENT_TEXT if hot else self.C_TEXT,
                     tags=("pill", tag))
                 self.canvas.tag_bind(tag, "<Enter>", lambda e, t=tag, p=(x, pill_y, x + pw, pill_y + pill_h), h=hot:
-                                     self._pill_hover(t, p, h, True))
+                                     (self._pill_hover(t, p, h, True),
+                                      self.canvas.configure(cursor="hand2")))
                 self.canvas.tag_bind(tag, "<Leave>", lambda e, t=tag, p=(x, pill_y, x + pw, pill_y + pill_h), h=hot:
-                                     self._pill_hover(t, p, h, False))
+                                     (self._pill_hover(t, p, h, False),
+                                      self.canvas.configure(cursor="fleur")))
                 self.canvas.tag_bind(tag, "<Button-1>",
                                      lambda e, i=abs_idx: self._click_select(i))
                 x += pw + 8
@@ -585,6 +637,8 @@ class GlobalIme:
 
     def _place(self):
         w, h = self._win_w, self._win_h
+        if self._dragging:
+            return  # 拖拽中, 不让心跳 place 抢位置
         if self.controller.buffer:
             # 组词中才查询光标; 节流, 避免每次心跳都唤起目标应用的无障碍接口
             now = time.time()
@@ -607,11 +661,15 @@ class GlobalIme:
             x, y = pt.x + 14, pt.y + 18
             area = monitor_work_area(pt.x, pt.y)
         else:
-            pt = wintypes.POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            left, top, right, bottom = monitor_work_area(pt.x, pt.y)
-            x, y = right - w - 60, bottom - h - 80
-            area = (left, top, right, bottom)
+            if self._idle_pos:
+                x, y = self._idle_pos            # 用户拖过的停靠位优先
+                area = monitor_work_area(x, y)
+            else:
+                pt = wintypes.POINT()
+                user32.GetCursorPos(ctypes.byref(pt))
+                left, top, right, bottom = monitor_work_area(pt.x, pt.y)
+                x, y = right - w - 60, bottom - h - 80
+                area = (left, top, right, bottom)
         x, y = fit_rect(x, y, w, h, *area)
         geo = f"{w}x{h}+{x}+{y}"
         if geo != self._last_geo:                 # 位置没变不重设, 防闪烁

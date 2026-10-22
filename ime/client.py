@@ -63,7 +63,8 @@ def tray_image(engaged=False):
 
 class WinClient(GlobalIme):
     def __init__(self):
-        super().__init__(user_path=app_data_dir() / "user_words.json")
+        super().__init__(user_path=app_data_dir() / "user_words.json",
+                         ui_settings_path=app_data_dir() / "ui.json")
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
