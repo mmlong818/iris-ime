@@ -22,6 +22,7 @@ SYLLABLE_RE = re.compile(r"[a-z]+")
 MAX_PER_PINYIN = 120   # 同音词条上限, 超出的低频词丢弃
 MAX_PER_INITIALS = 40  # 同简拼词条上限
 MAX_INITIALS_WORD_LEN = 6
+CHAR_TOP = 40          # 规范形音节下的单字合并上限
 
 
 def parse_rime_yaml(path: Path):
@@ -48,6 +49,26 @@ def parse_rime_yaml(path: Path):
             except ValueError:
                 weight = 1
             yield text, syllables, weight
+
+
+def canonical_syllable(s):
+    """模糊音规范形: zh/ch/sh→z/c/s, 声母 n→l, 韵母 ang/eng/ing→an/en/in。
+
+    只作用于声母与韵尾, 不碰音节中段的字母——min 的 m 与中段 n 均不动,
+    ming→lin(in→in? 不, ing→in 且 n→l 仅声母) 等组合才是标准模糊音语义。
+    """
+    initials = "bpmfdtnlgkhjqxrzcswyw"
+    if s[:2] in ("zh", "ch", "sh"):
+        ini, final = s[0], s[2:]
+    elif s[0] in initials and len(s) > 1:
+        ini, final = s[0], s[1:]
+    else:
+        ini, final = "", s
+    if ini == "n":
+        ini = "l"
+    if final.endswith("ang") or final.endswith("eng") or final.endswith("ing"):
+        final = final[:-1]
+    return ini + final
 
 
 def main():
@@ -119,11 +140,33 @@ def main():
         if len(lst) > MAX_PER_INITIALS:
             initial_words[key] = lst[:MAX_PER_INITIALS]
 
+    # 模糊音规范形索引: 每个词/字在"规范拼音"键下再挂一份,
+    # 引擎输入侧做同样的规范化后即可交叉命中(zhang→zan, nan→lan, ming→lin...)
+    syl_canon = {s: canonical_syllable(s) for s in syllables}
+    canon_words = {}
+    for (word, syls), w in word_weight.items():
+        ck = "".join(syl_canon.get(s, s) for s in syls)
+        canon_words.setdefault(ck, []).append((word, max(w, 1), " ".join(syls)))
+    for key, lst in canon_words.items():
+        lst.sort(key=lambda x: -x[1])
+        if len(lst) > MAX_PER_PINYIN:
+            canon_words[key] = lst[:MAX_PER_PINYIN]
+    canon_chars = {}
+    for py, lst in pinyin_chars.items():
+        ck = syl_canon.get(py, py)
+        merged = {ch: w for ch, w in canon_chars.get(ck, [])}
+        for ch, w in lst:
+            merged[ch] = max(merged.get(ch, 0), w)
+        canon_chars[ck] = sorted(merged.items(), key=lambda x: -x[1])[:CHAR_TOP]
+
     cache = {
         "syllables": syllables,
         "pinyin_chars": pinyin_chars,
         "word_by_pinyin": word_by_pinyin,
         "initial_words": initial_words,
+        "syl_canon": syl_canon,
+        "canon_words": canon_words,
+        "canon_chars": canon_chars,
     }
     with open(CACHE_PATH, "wb") as f:
         pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)

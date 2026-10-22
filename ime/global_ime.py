@@ -625,6 +625,12 @@ class GlobalIme:
 
 def selftest():
     """端到端自检: 注入 nihao+space, 期望引擎上屏 你好。"""
+    # 运行中的托盘实例也装着 LL 钩子, 会截走测试按键——先结束它们
+    import subprocess
+    for exe in ("IrisIME.exe", "PinyinIME.exe"):
+        subprocess.run(["taskkill", "/IM", exe, "/F"],
+                       capture_output=True)
+    time.sleep(0.3)
     app = GlobalIme(selftest=True)
     app.hook.start()
     app.state["enabled"] = True

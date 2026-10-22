@@ -47,7 +47,8 @@ class Engine:
     def __init__(self, cache_path=DEFAULT_CACHE, *,
                  word_bonus=2.0, char_penalty=24.0,
                  partial_penalty=2.0, initial_penalty=6.0,
-                 learn=False, user_path=None):
+                 learn=False, user_path=None,
+                 fuzzy=True, fuzzy_penalty=4.0):
         """可调打分参数:
 
         word_bonus      词每多一个音节的加成
@@ -56,6 +57,8 @@ class Engine:
         partial_penalty 尾部按前缀匹配未打完音节的罚分
         initial_penalty 简拼(纯声母串)匹配的罚分
         learn           开启用户词学习(上屏内容写入 user_path 并加权)
+        fuzzy           模糊音(zh/z, ch/c, sh/s, n/l, ang/an, eng/en, ing/in)
+        fuzzy_penalty   模糊命中边的罚分——精确命中永远排在模糊之前
         """
         with open(cache_path, "rb") as f:
             cache = pickle.load(f)
@@ -63,6 +66,7 @@ class Engine:
         self.word_by_pinyin: dict = cache["word_by_pinyin"]
         self.initial_words: dict = cache["initial_words"]
         self.syllables: list = sorted(cache["syllables"])
+        self.syl_set: set = set(self.syllables)
         self.sorted_keys: list = sorted(self.word_by_pinyin)
         self.log = lambda w: math.log(w if w > 0 else 1)
         self.word_bonus = word_bonus
@@ -78,6 +82,16 @@ class Engine:
         self.user_counts = {}   # text -> {"key": 拼音, "count": 次数}
         self.user_by_key = {}   # 拼音 -> {text: count}
         self._load_user()
+
+        # 模糊音: 输入串按音节切分后映射到规范形(zhang→zan, nan→lan...),
+        # 再查规范形索引; 缓存里没有规范形数据时自动降级为关闭
+        self.fuzzy = fuzzy
+        self.fuzzy_penalty = fuzzy_penalty
+        self.syl_canon = cache.get("syl_canon", {})
+        self.canon_words = cache.get("canon_words", {})
+        self.canon_chars = cache.get("canon_chars", {})
+        if not self.syl_canon:
+            self.fuzzy = False
 
     def attach_reranker(self, model_path=None):
         """挂载 chinese-ime-lm 的神经重排序模型(可选)。"""
@@ -174,6 +188,28 @@ class Engine:
         out.sort(key=lambda x: -x[1])
         return out
 
+    def _canon_keys(self, span, memo):
+        """把按键串按有效音节切分, 映射到规范形, 返回与原串不同的规范键。"""
+        if not self.fuzzy or len(span) < 2 or len(span) > MAX_SPAN:
+            return ()
+        if span in memo:
+            return memo[span]
+        segs = [set() for _ in range(len(span) + 1)]
+        segs[0].add("")
+        for i in range(len(span)):
+            if not segs[i]:
+                continue
+            for j in range(i + 1, min(i + 6, len(span)) + 1):
+                s = span[i:j]
+                if s in self.syl_set:
+                    c = self.syl_canon.get(s, s)
+                    for prefix in segs[i]:
+                        if len(segs[j]) < 6:
+                            segs[j].add(prefix + c)
+        keys = tuple(segs[len(span)])[:4]
+        memo[span] = keys
+        return keys
+
     def _build_edges(self, P):
         """edges_from[i] = [(end, text, score, kind)]。
 
@@ -182,6 +218,7 @@ class Engine:
         """
         n = len(P)
         edges_from = [[] for _ in range(n)]
+        canon_memo = {}
         for i in range(n):
             limit = min(i + MAX_SPAN, n)
             bucket = edges_from[i]
@@ -208,6 +245,20 @@ class Engine:
                         if ch not in seen:
                             seen.add(ch)
                             bucket.append((j, ch, self.log(wt) - self.char_penalty, "char"))
+                # 模糊音: 规范形键查询(精确命中已占文本位, 模糊带罚分补位)
+                for ck in self._canon_keys(key, canon_memo):
+                    for w, wt, py in self.canon_words.get(ck, [])[:WORD_EDGE_CAP]:
+                        if w not in seen:
+                            seen.add(w)
+                            nsyl = py.count(" ") + 1
+                            bucket.append((j, w, self.log(wt) + self.word_bonus * (nsyl - 1)
+                                           - self.char_penalty - self.fuzzy_penalty, "word"))
+                    if j - i <= 6:
+                        for ch, wt in self.canon_chars.get(ck, [])[:CHAR_EDGE_CAP]:
+                            if ch not in seen:
+                                seen.add(ch)
+                                bucket.append((j, ch, self.log(wt) - self.char_penalty
+                                               - self.fuzzy_penalty, "char"))
             rem = P[i:]
             if len(rem) <= MAX_SPAN and rem not in self.word_by_pinyin:
                 for w, wt, nsyl in self._prefix_words(rem)[:WORD_EDGE_CAP]:
