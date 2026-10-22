@@ -16,3 +16,4 @@ dicts/cache.pkl
 # 实验残留
 ime/_exp.py
 ime/_engine_exp.py
+release/
