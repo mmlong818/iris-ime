@@ -1,4 +1,4 @@
-"""Windows 托盘客户端: 拼音输入法常驻程序。
+"""Windows 托盘客户端: 鸢尾输入法常驻程序。
 
 托盘图标右键菜单:
   开启输入(Ctrl+Alt+P) —— 与热键等效
@@ -50,10 +50,10 @@ def model_path(name):
 
 
 def tray_image(engaged=False):
-    """程序生成的托盘图标: 水杉绿方块 + P 字, 随输入状态变色。"""
+    """程序生成的托盘图标: 鸢尾紫方块 + P 字, 随输入状态变色。"""
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    body = (46, 194, 126, 255) if engaged else (110, 116, 125, 255)  # 水杉绿/灰
+    body = (139, 124, 240, 255) if engaged else (110, 116, 125, 255)  # 鸢尾紫/灰
     d.rounded_rectangle([6, 6, 58, 58], radius=12, fill=body)
     d.rectangle([20, 14, 28, 50], fill="white")
     d.rectangle([20, 14, 46, 24], fill="white")
@@ -90,7 +90,7 @@ class WinClient(GlobalIme):
             pystray.MenuItem("退出", self._menu_quit),
         )
         self.icon = pystray.Icon("pinyin-ime", tray_image(),
-                                 f"拼音输入法 v{__version__}", menu)
+                                 f"鸢尾输入法 v{__version__}", menu)
         self.icon.run_detached()
 
     def _menu_toggle(self, icon, item):
@@ -131,7 +131,7 @@ class WinClient(GlobalIme):
         win = self.stats_win = tk_toplevel(self.root)
         eng = self.controller.engine
         lines = [
-            f"拼音输入法 v{__version__}",
+            f"鸢尾输入法 v{__version__}",
             f"输入状态: {'开启' if self.state['enabled'] else '关闭'} (Ctrl+Alt+P)",
             f"重排序模型: {self.model_name}" if eng.reranker else "重排序模型: 未启用",
             f"学习词条: {len(eng.user_counts)} 条",
@@ -140,7 +140,7 @@ class WinClient(GlobalIme):
         ]
         for i, line in enumerate(lines):
             w = tk_label(win, line, row=i)
-        win.title("拼音输入法 · 统计")
+        win.title("鸢尾输入法 · 统计")
 
     # ---- 运行 ----
 

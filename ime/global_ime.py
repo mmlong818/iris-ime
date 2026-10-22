@@ -396,7 +396,7 @@ class GlobalIme:
         hwnd = int(self.root.frame(), 16) if isinstance(self.root.frame(), str) else self.root.frame()
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
                               user32.GetWindowLongW(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE)
-        # ---- 视觉: "水杉"主题 —— 深色玻璃 + 水杉绿 + 药丸候选 ----
+        # ---- 视觉: "鸢尾"主题 —— 深色玻璃 + 鸢尾蓝紫 + 药丸候选 ----
         # 与主流输入法(白底蓝字)刻意区分: 整窗半透明模拟玻璃, 候选为药丸形
         self.C_KEY = "#010203"        # 抠透明色(四角)
         self.C_BG = "#20242c"         # 深色底(玻璃)
@@ -405,9 +405,9 @@ class GlobalIme:
         self.C_PILL_HOVER = "#3a4450"
         self.C_TEXT = "#e8eaee"
         self.C_GRAY = "#8a94a3"
-        self.C_PINYIN = "#7fae9b"     # 拼音: 带绿意的灰
-        self.C_ACCENT = "#2ec27e"     # 水杉绿
-        self.C_ACCENT_TEXT = "#0e211a"
+        self.C_PINYIN = "#a29bd0"     # 拼音: 带紫意的灰
+        self.C_ACCENT = "#8b7cf0"     # 鸢尾蓝紫
+        self.C_ACCENT_TEXT = "#191236"
         self.root.configure(bg=self.C_KEY)
         self.root.attributes("-transparentcolor", self.C_KEY)
         try:

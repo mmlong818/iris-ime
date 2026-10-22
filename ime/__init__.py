@@ -1,6 +1,6 @@
-"""自研拼音输入法: 解码引擎 + 神经重排 + 桌面客户端。"""
+"""鸢尾输入法 (Iris IME): 解码引擎 + 神经重排 + 桌面客户端。"""
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 from .engine import Candidate, DecodeResult, Engine
 

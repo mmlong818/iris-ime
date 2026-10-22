@@ -1,6 +1,6 @@
-# 拼音输入法(自研原型) · 水杉
+# 鸢尾输入法 (Iris IME)
 
-一个纯 Python 的全拼输入法: 词格 DAG + Viterbi 整句解码引擎 + 神经重排序,
+**鸢尾输入法**——一个纯 Python 的全拼输入法: 词格 DAG + Viterbi 整句解码引擎 + 神经重排序,
 两种前端——Tkinter 打字板与**全局键盘钩子模式**(任意应用里打字)。
 支持全拼、未打完音节的预输入补全、简拼(声母串)。
 
@@ -47,7 +47,7 @@ python tools/eval.py --grid   # 网格搜索调参
 ## Windows 客户端(ime/client.py)
 
 托盘常驻应用 = 全局钩子模式 + 托盘菜单。开发态 `python -m ime.client`;
-发布版双击 `dist/PinyinIME/PinyinIME.exe` 即用, 无需 Python。
+发布版双击 `dist/IrisIME/IrisIME.exe` 即用, 无需 Python。
 
 托盘菜单: 开启输入(与 Ctrl+Alt+P 等效) · 模型 4M/25M 运行时热切换 ·
 开机自启(写 HKCU Run 键) · 打开学习记录目录 · 统计(词条数/模型/状态) · 退出。
@@ -55,7 +55,7 @@ python tools/eval.py --grid   # 网格搜索调参
 打包:
 
 ```bash
-pyinstaller --noconfirm --name PinyinIME --windowed --onedir --paths . \
+pyinstaller --noconfirm --name IrisIME --windowed --onedir --paths . \
   --add-data "models/sentence-model-4m.safetensors;models" \
   --add-data "models/sentence-model-25m.safetensors;models" \
   --add-data "dicts/cache.pkl;dicts" client_main.py
@@ -77,11 +77,11 @@ pyinstaller --noconfirm --name PinyinIME --windowed --onedir --paths . \
 **PgUp/PgDn 或 -/= 翻页**, Esc 清编码, 回车原样上屏。**Caps Lock 开启期间
 字母一律直通**(不进编码, 与主流输入法一致), 状态条显示 "Caps(字母直通)";
 Shift+字母同样直传。
-**外观**: "水杉"主题, 刻意与主流输入法(白底蓝字)区分——深色玻璃拟态
-(整窗 94% 不透明度 + 圆角抠角), 水杉绿点缀(品牌圆点/首选实心绿药丸/
-拼音绿灰), 候选为**药丸形**(Canvas 绘制, 悬停变亮、可点击, NOACTIVATE
+**外观**: "鸢尾"主题, 刻意与主流输入法(白底蓝字)区分——深色玻璃拟态
+(整窗 94% 不透明度 + 圆角抠角), 鸢尾蓝紫点缀(品牌圆点/首选实心紫药丸/
+拼音紫灰), 候选为**药丸形**(Canvas 绘制, 悬停变亮、可点击, NOACTIVATE
 不抢目标焦点), 宽度按内容自适应(上限跟随虚拟桌面宽度, 超宽自动换行不裁词),
-闲置时收成带绿点的细条; 托盘图标同色系。
+闲置时收成带绿点的细条; 托盘图标同色系。发布名 **鸢尾输入法 / Iris IME**(仓库 iris-ime)。
 `python -m ime.global_ime --selftest` 做无人值守端到端自检(注入合成按键验证
 钩子→解码→上屏链路, 测试期间临时关闭 Caps Lock 并恢复)。
 

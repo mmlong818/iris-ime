@@ -166,7 +166,7 @@ class ImeApp:
 
     def _build_widgets(self):
         r = self.root
-        r.title("拼音输入法 · 打字板")
+        r.title("鸢尾输入法 · 打字板")
         r.geometry("560x430")
         r.attributes("-topmost", True)
         r.configure(bg="#1e1e1e")
