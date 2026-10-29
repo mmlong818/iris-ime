@@ -52,6 +52,11 @@ class EngineTest(unittest.TestCase):
         r = self.engine.decode("jiadu")
         self.assertTrue(any("佳" in c.preview for c in r.candidates))
 
+    def test_mid_frequency_words_not_capped_out(self):
+        # 移植(yizhi)同音词排第 11, 不得被词边容量裁掉(用户实测缺失)
+        r = self.engine.decode("yizhi")
+        self.assertTrue(any(c.preview == "移植" for c in r.candidates))
+
     def test_no_crash_on_weird_input(self):
         for bad in ["", " ", "'", "vvv", "ii", "x", "a" * 100, "NIHAO", "ni'hao"]:
             self.engine.decode(bad)  # 不抛异常即可

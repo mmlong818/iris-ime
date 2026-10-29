@@ -19,7 +19,7 @@ DEFAULT_CACHE = Path(__file__).resolve().parent.parent / "dicts" / "cache.pkl"
 # ---- 结构常量 ----
 MAX_INPUT = 64          # 编码缓冲上限(字母)
 MAX_SPAN = 24           # 单条边最多覆盖的字母数
-WORD_EDGE_CAP = 8       # 每个 (i,j) 跨度保留的词条数
+WORD_EDGE_CAP = 16      # 每个 (i,j) 跨度保留的词条数(8 会裁掉移植等中频词)
 CHAR_EDGE_CAP = 14      # 每个音节保留的单字数(6 会裁掉佳/cis等中频字)
 CAND_HEAD_COUNT = 10    # 生成候选时首段跨度的额外词条数
 MAX_CANDIDATES = 500    # 安全硬上限(防病态输入); 正常候选不受限, 翻页浏览
