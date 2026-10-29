@@ -69,20 +69,19 @@ class PhraseCompositionTest(unittest.TestCase):
         for ch in text:
             self.ctl.feed_key(ch, ch)
 
-    def test_first_segment_selectable_for_out_of_dict_words(self):
-        # 词表没有"硬编": 必须存在"硬"@4 的逐字条目
+    def test_out_of_dict_word_in_candidates(self):
+        # 词表没有"硬编": 整句读法候选中应包含它
         self.type("yingbian")
-        self.assertTrue(any(c.text == "硬" and c.commit_end == 4
+        self.assertTrue(any(c.preview == "硬编"
                             for c in self.ctl.result.candidates))
 
-    def test_consecutive_commits_learn_compound(self):
+    def test_out_of_dict_word_select_and_learn(self):
+        # 整条上屏语义: 选中"硬编"候选即整条上屏并被学习, 第二遍直达
         self.type("yingbian")
         hard = next(i for i, c in enumerate(self.ctl.result.candidates)
-                    if c.text == "硬" and c.commit_end == 4)
-        self.ctl.feed_key(str(hard + 1), str(hard + 1))   # 上屏"硬"
-        bian = next(i for i, c in enumerate(self.ctl.result.candidates)
-                    if c.text == "编")
-        self.ctl.feed_key(str(bian + 1), str(bian + 1))   # 上屏"编"
+                    if c.preview == "硬编")
+        self.ctl.feed_key(str(hard + 1), str(hard + 1))
+        self.assertEqual(self.ctl.output, "硬编")
         self.assertIn("硬编", self.ctl.engine.user_counts)
         self.type("yingbian")                             # 第二遍直达
         self.assertEqual(self.ctl.result.candidates[0].preview, "硬编")

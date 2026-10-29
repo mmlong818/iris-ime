@@ -363,39 +363,31 @@ class Engine:
                 if len(paths[j]) >= beam:
                     break
 
-        # 候选 = 完整路径。多样性规则:
-        #   - 每条路径都出"首段"条目——没有它就无法逐字组词(如 yingbian
-        #     想打"硬编": 词表没有该词, 必须先上屏"硬"再组"编", 用户词学习
-        #     才能记住它);
-        #   - 次优路径另出"双段上屏"变体(提交点推进到第二边末尾, 一步兑现
-        #     该路径的读法);
-        #   - 同一首段的路径最多 4 条(评测调得)——否则 长民/章民/涨民… 的
-        #     首字变体会把句中歧义(张敏)挤出列表。
-        GROUP_CAP = 4
+        # 候选 = 完整读法(整条上屏语义): 每条 k-best 路径就是一个候选,
+        # 药丸显示完整读法, 选中即整条上屏(词表外组合如"硬编"一次选中)。
+        # 候选不限量, 不设同首段配额——配额是"27 槽"时代的产物, 会把
+        # 用户想要的低频读法(硬编)按纯词频挤掉; 翻页可达全部读法。
         entries = []
-        for rank, (sc, edges) in enumerate(paths[target]):
+        for sc, edges in paths[target]:
             preview = "".join(t for t, _, _, _ in edges)
             pinyin = "'".join(" ".join(s for _, _, _, s in edges).split())
-            group = (edges[0][0], edges[0][1])
-            entries.append((sc, edges[0][1], edges[0][0], edges[0][2],
-                            preview, group, pinyin))
-            if rank > 0 and len(edges) >= 2:
-                entries.append((sc, edges[1][1],
-                                edges[0][0] + edges[1][0], edges[0][2],
-                                preview, group, pinyin))
+            entries.append((sc, preview, edges[0][2], pinyin))
         entries.sort(key=lambda e: -e[0])
         seen = set()
         group_count = {}
-        for sc, end, text, kind, preview, group, pinyin in entries:
-            dedup = (preview, text, end)
-            if dedup in seen:
+        if __import__('os').environ.get('IRIS_DBG'):
+            hit = [i for i, e in enumerate(entries) if e[1] == '硬编']
+            print(f"[dbg] entries={len(entries)} 硬编位置={hit}",
+                  f"前5={[e[1] for e in entries[:5]]}")
+            if hit:
+                i = hit[0]
+                print(f"[dbg] 硬编 entry: score={entries[i][0]:.2f} group={entries[i][3]}")
+        for sc, preview, kind, pinyin in entries:
+            if preview in seen:
                 continue
-            if group_count.get(group, 0) >= GROUP_CAP:
-                continue
-            seen.add(dedup)
-            group_count[group] = group_count.get(group, 0) + 1
+            seen.add(preview)
             result.candidates.append(
-                Candidate(text=text, commit_end=end, preview=preview,
+                Candidate(text=preview, commit_end=target, preview=preview,
                           score=sc, kind=kind, pinyin=pinyin))
             if len(result.candidates) >= MAX_CANDIDATES:
                 break

@@ -75,11 +75,12 @@ class ControllerTest(unittest.TestCase):
         self.assertIn("你好", self.ctl.output)
         self.assertEqual(self.ctl.buffer, "")
 
-    def test_digit_selects_first_segment(self):
+    def test_digit_commits_whole_reading(self):
+        # 整条上屏语义: 数字选中该候选的完整读法
         self.type("wojintianqushangban")
         self.ctl.feed_key("1", "1")
-        self.assertEqual(self.ctl.output, "我")       # 只上屏首段
-        self.assertEqual(self.ctl.buffer, "jintianqushangban")  # 余下编码继续
+        self.assertEqual(self.ctl.output, "我今天去上班")
+        self.assertEqual(self.ctl.buffer, "")
 
     def test_backspace_and_escape(self):
         self.type("abc")
