@@ -346,7 +346,9 @@ class Engine:
         # 与旧变体机制持平且代码更简; beam=27 时句中歧义被首字变体挤出):
         # 候选不再只变首段——整句任意位置的次优读法(民/敏、在/再、书放/书房)
         # 都按路径总分直接进列表, 逐段按文本去重。取代"次优后缀+第二边变体"补丁。
-        beam = 120   # 路径枚举深度; 候选全量保留(翻页浏览), 不再截断
+        # 路径枚举深度: 200 为实测平衡点——词表外两字组合(先拿@167)
+        # 可达列表深位(配合逐字组词+合成词学习), 整句解码 ~21ms
+        beam = 200
         paths = [[] for _ in range(n + 1)]   # paths[j] = [(score, edges)]
         paths[0] = [(0.0, ())]
         for j in range(1, n + 1):
@@ -382,6 +384,9 @@ class Engine:
             entries.append((sc, preview, edges[0][2], pinyin, len(edges)))
         entries.sort(key=lambda e: -e[0])
         seen = set()
+        if __import__('os').environ.get('IRIS_DBG'):
+            hit = [(i+1, round(e[0], 2)) for i, e in enumerate(entries) if e[1] == '先拿']
+            print(f"[dbg] entries={len(entries)} 先拿: {hit or '不在'}")
         for sc, preview, kind, pinyin, n_edges in entries:
             if preview in seen:
                 continue
@@ -418,19 +423,16 @@ class Engine:
                 return True
             return c.preview in key_words
 
+        # 预筛: 只把路径分接近最优的候选送模型(12 nat 窗口——平衡
+        # 长句批量评分从 ~120 条降到数十条
+        if cands:
+            top_sc = cands[0].score
+            cands = [c for c in cands if c.score >= top_sc - 12.0] or cands[:9]
         facts = [(c.kind != "initial", trusted(c)) for c in cands]
         # 考虑集: 前 3 条(分数序)+ 全列表等距采样 6 条, 共 9 条——
         # 深位读法(书放在/硬编)也能获得模型评估, 不被分数序埋没
-        considered = list(range(min(3, len(cands))))
-        if len(cands) > 6:
-            # 等距采样覆盖整个列表(含深位), 共 9 条
-            span = len(cands) - 4
-            considered += sorted(set(min(3 + int(i * span / 6), len(cands) - 1)
-                                     for i in range(1, 7)))
-        considered = sorted(set(considered))[:9]
-        sub_texts = [cands[i].preview for i in considered]
-        sub_facts = [facts[i] for i in considered]
-        idx = self.reranker.best_where(context, sub_texts, sub_facts)
+        # 全量评分(桌面端停顿补评可承受): 深位金标(书放在)不再被
+        # 9 窗采样埋没; 门控仍拒绝可信 leader
+        idx = self.reranker.best_of_all(context, [c.preview for c in cands], facts)
         if idx is not None:
-            promoted = considered[idx]
-            cands[0], cands[promoted] = cands[promoted], cands[0]
+            cands[0], cands[idx] = cands[idx], cands[0]

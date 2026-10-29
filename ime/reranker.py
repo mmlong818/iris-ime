@@ -92,8 +92,8 @@ class SentenceModel:
         x64 = x.astype(np.float64)
         return (0.5 * x64 * (1.0 + _erf(x64 / np.sqrt(2.0)))).astype(np.float32)
 
-    def forward(self, tokens):
-        """tokens: [B, T] 的 int 数组, 返回 logits [B, T, vocab](绑定词表)。"""
+    def hidden_states(self, tokens):
+        """tokens: [B, T] 的 int 数组, 返回最后一层隐状态 [B, T, n_embd]。"""
         tokens = np.asarray(tokens, dtype=np.int64)
         bsz, tlen = tokens.shape
         x = self.t["tok.weight"][tokens] + self.t["pos.weight"][:tlen]
@@ -115,8 +115,11 @@ class SentenceModel:
             x = x + self._linear(y, f"{p}.proj")
             y = self._ln(x, self.t[f"{p}.ln2.weight"], self.t[f"{p}.ln2.bias"])
             x = x + self._linear(self._gelu(self._linear(y, f"{p}.fc")), f"{p}.out")
-        x = self._ln(x, self.t["ln_f.weight"], self.t["ln_f.bias"])
-        return x @ self.t["tok.weight"].T
+        return x  # 隐状态; logits 由调用方按需投影(省全词表大矩阵乘)
+
+    def project_logits(self, hidden_rows):
+        """隐状态行 [R, D] -> 词表 logits [R, V](绑定词表)。"""
+        return hidden_rows @ self.t["tok.weight"].T
 
     # ---------- 打分 ----------
 
@@ -138,14 +141,26 @@ class SentenceModel:
         batch = np.zeros((len(seqs), tmax), dtype=np.int64)
         for r, s in enumerate(seqs):
             batch[r, :len(s)] = s
-        logits = self.forward(batch)                                  # [B,T,V]
+        hidden = self.hidden_states(batch)                            # [B,T,D]
+        # 收集所有需要的 (batch, 行) 对, 一次性投影词表(省全词表大矩阵乘)
+        row_idx, row_owner = [], []
+        for r, tail in enumerate(tails):
+            for j in range(len(tail)):
+                row_idx.append(plen - 1 + j)
+                row_owner.append(r)
+        if not row_idx:
+            return [float("-inf")] * len(tails)
+        H = self.t["tok.weight"].T                                   # [D, V]
+        sel = hidden[np.asarray(row_owner), np.asarray(row_idx)]     # [R, D]
+        logits_rows = sel @ H                                        # [R, V]
         out = []
+        pos = 0
         for r, tail in enumerate(tails):
             if not tail:
                 out.append(float("-inf"))
                 continue
-            # 位置 p 预测 p+1; 候选首字由前缀最后位置(plen-1)预测
-            rows = logits[r, plen - 1: plen - 1 + len(tail), :]       # [n, V]
+            rows = logits_rows[pos:pos + len(tail)]
+            pos += len(tail)
             logp = rows - self._logsumexp(rows)
             total = float(np.sum(logp[np.arange(len(tail)), tail]))
             out.append(total / len(tail))
@@ -184,3 +199,18 @@ class Reranker:
 
     def log_probabilities(self, context, candidates):
         return self.model.score(context, list(candidates))
+
+    def best_of_all(self, context, texts, facts):
+        """全量评分版决策: 桌面端停顿补评时可承受(~百条 × 0.33ms/字)。
+
+        与 best_where 的差异: 考虑集不截断到 9 条——整条读法语义下
+        深位候选(书放在 vs 书房)恰恰是用户想要的, 按 9 窗采样会漏。
+        门控不变: leader 可信或不应答按键则拒绝。"""
+        if not facts:
+            return None
+        answers, trusted = facts[0]
+        if trusted or not answers:
+            return None
+        scores = self.model.score(context, list(texts))
+        best = max(range(len(scores)), key=lambda i: scores[i])
+        return best if best != 0 else None
