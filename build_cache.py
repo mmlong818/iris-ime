@@ -29,7 +29,7 @@ def parse_rime_yaml(path: Path):
     """解析 rime 词表: 跳过 YAML 头, 产出 (文本, 音节列表, 权重)。"""
     with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.rstrip("\n")
+            line = line.rstrip(chr(10))  # \n")
             if not line.strip() or line.startswith("#"):
                 continue
             if line in ("---", "..."):
@@ -73,7 +73,9 @@ def canonical_syllable(s):
 
 def main():
     char_files = [DICTS_DIR / "8105.dict.yaml"]
-    word_files = [DICTS_DIR / "base.dict.yaml"]
+    word_files = [DICTS_DIR / "base.dict.yaml",
+                  DICTS_DIR / "ext.dict.yaml",
+                  DICTS_DIR / "tencent.dict.yaml"]
 
     syllables = set()
     char_weight = {}          # (char, pinyin) -> max weight
@@ -104,6 +106,71 @@ def main():
             syllables.update(syls)
             count += 1
         print(f"{path.name}: {count} 条词条")
+
+    # 腾讯词库(两列: 词+权重, 无拼音列): 用 pypinyin 标注拼音后并入。
+    # 纯汉字、逐字可得拼音才收; 权重统一放大 200 倍(源权重均为 100)。
+    tencent_path = DICTS_DIR / "tencent.dict.yaml"
+    if tencent_path.exists():
+        from pypinyin import lazy_pinyin
+        tcount = 0
+        for line in tencent_path.read_text(encoding="utf-8").splitlines():
+            line = line.rstrip(chr(10))
+            if not line or line.startswith("#") or line == "...":
+                continue
+            parts = line.split("	")
+            if len(parts) < 2:
+                continue
+            word = parts[0].strip()
+            if not (1 <= len(word) <= 12):
+                continue
+            if any(not ("一" <= ch <= "鿿") for ch in word):
+                continue  # 只要纯汉字词
+            try:
+                weight = int(parts[1])
+            except ValueError:
+                continue
+            syls = tuple(lazy_pinyin(word))
+            key = (word, tuple(syls))
+            word_weight[key] = max(word_weight.get(key, 0), weight * 200)
+            syllables.update(syls)
+            tcount += 1
+        print(f"tencent.dict.yaml: {tcount} 条词条(pypinyin 标注)")
+
+    # 微软 SampleIME 词库(MIT): UTF-16LE, 行格式 "pinyin"="word";
+    # 拼音是未切分的全拼(如 NIHAO), 用已建好的音节表做 DP 切分;
+    # 权重取中频 6 万, 只补齐 rime 词库没覆盖的词(重复合并不影响原有权重)
+    ms_path = DICTS_DIR / "ms-sample-quanpin.txt"
+    if ms_path.exists():
+        import re as _re
+        raw = ms_path.read_bytes().decode("utf-16")
+        syls_set = set(syllables)  # base/tencent/ext 已解析, 音节表已齐
+
+        def split_pinyin(py):
+            n = len(py)
+            segs = [[] for _ in range(n + 1)]
+            segs[0].append([])
+            for i in range(n):
+                for pre in segs[i]:
+                    for j in range(i + 1, min(i + 6, n) + 1):
+                        s = py[i:j]
+                        if s in syls_set and len(segs[j]) < 8:
+                            segs[j].append(pre + [s])
+            return segs[n][0] if segs[n] else None
+
+        ms_count = 0
+        for left, right in _re.findall(r'"([^"]+)"\s*=\s*"([^"]+)"', raw):
+            py = left.strip().lower()
+            word = right.strip()
+            if not py or not word or not _re.fullmatch(r"[a-z]+", py):
+                continue
+            syls = split_pinyin(py)
+            if not syls:
+                continue
+            key = (word, tuple(syls))
+            word_weight[key] = max(word_weight.get(key, 0), 60000)
+            syllables.update(syls)
+            ms_count += 1
+        print(f"ms-sample-quanpin: {ms_count} 条补充词条")
 
     pinyin_chars = {}
     for (ch, py), w in char_weight.items():

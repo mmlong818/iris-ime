@@ -17,12 +17,21 @@ safetensors `__metadata__` 的 `attribution` 字段中):
 
 ## 2. 词库 — rime-ice(部分)
 
-- 来源: https://github.com/gaboolic/rime-ice (cn_dicts/8105.dict.yaml、cn_dicts/base.dict.yaml)
+- 来源: https://github.com/gaboolic/rime-ice
+  (cn_dicts/8105.dict.yaml、base.dict.yaml、ext.dict.yaml、tencent.dict.yaml)
 - 许可: **GNU Free Documentation License 1.3**
 - 本产品将上述词表转换为二进制缓存(dicts/cache.pkl)随包分发。
   依 GFDL 义务, 再分发时须保证词库部分(含本声明中对其来源与许可的说明)
   以相同许可提供; 个人使用无额外要求。
 - 字频数据: 《25亿字语料汉字字频表》(北京语言大学), 经 rime-ice 引入。
+- tencent.dict.yaml 源自腾讯云词库(经 rime-ice 整理), 词条 98 万+
+  由 pypinyin(MIT)标注拼音。
+
+## 2b. 微软 SampleIME 词库(MIT)
+
+- 来源: microsoft/Windows-classic-samples Samples/IME/cpp/SampleIME
+  (SampleIMESimplifiedQuanPin.txt, UTF-16)
+- 约 5.3 万条常用词补充, 依 MIT 许可随包分发。
 
 ## 3. 评测数据(仅开发期使用, 不随运行时分发, 亦不含于本仓库)
 
