@@ -89,10 +89,11 @@ class ControllerTest(unittest.TestCase):
         self.ctl.feed_key("Escape")
         self.assertEqual(self.ctl.buffer, "")
 
-    def test_enter_commits_chinese(self):
+    def test_enter_commits_raw_letters(self):
+        # 回车 = 字母原样上屏(经典 IME 惯例), 中文用空格; 不附加换行
         self.type("nihao")
         self.ctl.feed_key("Return")
-        self.assertIn("你好", self.ctl.output)
+        self.assertEqual(self.ctl.output, "nihao")
         self.assertEqual(self.ctl.buffer, "")
 
     def test_enter_unparseable_letters_raw_no_newline(self):

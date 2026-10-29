@@ -6,9 +6,11 @@ MSAA 的 OBJID_CARET 越来越不可靠; UIA 的 TextPattern.GetSelection()
 """
 
 import threading
+import time
 
 _uia = None
 _uia_lock = threading.Lock()
+_backoff_until = 0.0   # UIA 慢时退避 10 秒(主线程阻塞会造成打字卡顿)
 
 
 def _get_uia():
@@ -30,7 +32,11 @@ def uia_caret_rect():
 
     调用线程须已 CoInitialize。首次调用会构建 UIA 类型库(约数百毫秒),
     之后走缓存。"""
+    global _backoff_until
+    if time.monotonic() < _backoff_until:
+        return None
     try:
+        t0 = time.monotonic()
         obj, UIA = _get_uia()
         el = obj.GetFocusedElement()
         if el is None:
@@ -48,8 +54,13 @@ def uia_caret_rect():
         x, y, w, h = rects[0], rects[1], rects[2], rects[3]
         if h <= 0 or h > 200 or w > 400:
             return None  # 整窗/整行矩形不是光标
+        cost = time.monotonic() - t0
+        if cost > 0.15:
+            _backoff_until = time.monotonic() + 10.0
         return int(x), int(y + h), int(y), False
     except Exception:
+        if time.monotonic() - t0 > 0.5:
+            _backoff_until = time.monotonic() + 10.0
         return None
 
 
@@ -58,7 +69,11 @@ def uia_focused_rect():
 
     供"封闭自绘 UI"(如微信)使用: 它们给不出精确光标, 但焦点元素
     (聊天栏/输入区)的矩形足够把候选框带到输入区域旁边。"""
+    global _backoff_until
+    if time.monotonic() < _backoff_until:
+        return None
     try:
+        t0 = time.monotonic()
         obj, UIA = _get_uia()
         el = obj.GetFocusedElement()
         if el is None:

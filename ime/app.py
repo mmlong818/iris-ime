@@ -8,6 +8,7 @@
 """
 
 import sys
+import time
 from pathlib import Path
 
 import tkinter as tk
@@ -42,14 +43,24 @@ class InputController:
         self.last_commit = ""
         self.page = 0          # 候选页码(0 起)
         self.page_size = PAGE_SIZE
+        self._rerank_pending = False   # 打字中挂起重排, 停顿后补
+        self._last_key_ts = 0.0
         self.on_change = None  # 回调, 参数为状态 dict
 
-    def _decode(self):
+    def _decode(self, rerank=True):
         if self.buffer:
-            self.result = self.engine.decode(self.buffer, context=self.committed[-64:])
+            self.result = self.engine.decode(self.buffer, context=self.committed[-64:],
+                                             rerank=rerank)
         else:
             self.result = None
         self.page = 0  # 编码变了, 回到第一页
+
+    def settle_rerank(self):
+        """打字停顿后补一次带重排的解码(客户端空闲心跳调用)。"""
+        if self._rerank_pending and self.buffer:
+            self._decode(rerank=True)
+            self._rerank_pending = False
+            self._notify()
 
     @property
     def page_candidates(self):
@@ -119,22 +130,18 @@ class InputController:
         if keysym == "BackSpace":
             if self.buffer:
                 self.buffer = self.buffer[:-1]
-                self._decode()
+                self._decode(rerank=False)
+                self._rerank_pending = True
+                self._last_key_ts = time.monotonic()
             else:
                 changed = False
         elif keysym == "Escape":
             self.buffer = ""
             self._decode()
         elif keysym == "Return":
-            if self.result and self.result.candidates:
-                # 组词中回车 = 上屏中文(同空格)。不附加换行——否则终端类应用
-                # (Claude Code)会把未确认的内容直接发送
-                cand0 = self.result.candidates[0]
-                self._commit(cand0.preview, self.buffer[:self.result.consumed], cand0.kind)
-                self.buffer = self.buffer[self.result.consumed:]
-                self._decode()
-            elif self.buffer:
-                # 无法解码的输入(命令/网址): 字母原样上屏, 不附加回车
+            # 经典 IME 惯例: 回车 = 字母原样上屏(中文用空格)。不附加换行——
+            # 终端类应用里再按一次回车(空编码透传)即发送
+            if self.buffer:
                 self._commit(self.buffer)
                 self.buffer = ""
                 self._decode()
@@ -157,7 +164,9 @@ class InputController:
             self._select(self.page * self.page_size + int(keysym[3:]) - 1)
         elif char.isalpha():
             self.buffer += char.lower()
-            self._decode()
+            self._decode(rerank=False)
+            self._rerank_pending = True
+            self._last_key_ts = time.monotonic()
         elif char.isdigit():
             self._select(self.page * self.page_size + int(char) - 1)
         else:

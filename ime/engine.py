@@ -292,8 +292,9 @@ class Engine:
 
     # ---------- 解码 ----------
 
-    def decode(self, raw: str, context: str = "") -> DecodeResult:
-        """context: 已上屏文本, 供重排序模型做条件打分(未挂载时忽略)。"""
+    def decode(self, raw: str, context: str = "", rerank: bool = True) -> DecodeResult:
+        """context: 已上屏文本, 供重排序模型做条件打分(未挂载时忽略)。
+        rerank=False: 跳过神经重排(快速打字时用, 停顿后补一次)。"""
         P = raw.lower().replace("'", "").replace(" ", "")[:MAX_INPUT]
         n = len(P)
         result = DecodeResult()
@@ -391,7 +392,7 @@ class Engine:
                           score=sc, kind=kind, pinyin=pinyin))
             if len(result.candidates) >= MAX_CANDIDATES:
                 break
-        if self.reranker is not None and result.remainder == "":
+        if rerank and self.reranker is not None and result.remainder == "":
             self._apply_rerank(result, n, context)
         return result
 

@@ -222,6 +222,7 @@ class WinClient(GlobalIme):
             self.icon.icon = tray_image(self.state["enabled"])
             if toggled:
                 self.icon.update_menu()
+        self.controller.settle_rerank()
         self._render()
         self.root.after(20, self._tick)
 

@@ -558,6 +558,7 @@ class GlobalIme:
                     self._flush_output()
         except queue.Empty:
             pass
+        self.controller.settle_rerank()
         self._render()
         self.root.after(20, self._tick)
 
