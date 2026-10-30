@@ -559,6 +559,7 @@ class GlobalIme:
         except queue.Empty:
             pass
         self.controller.settle_rerank()
+        self.controller.poll_rerank()  # 后台重排算完且缓冲未变 → 换头
         self._render()
         self.root.after(20, self._tick)
 

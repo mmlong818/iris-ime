@@ -8,6 +8,7 @@
 """
 
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -44,6 +45,9 @@ class InputController:
         self.page = 0          # 候选页码(0 起)
         self.page_size = PAGE_SIZE
         self._rerank_pending = False   # 打字中挂起重排, 停顿后补
+        self._rerank_busy = False      # 后台重排线程在跑
+        self._rerank_done = None       # (缓冲快照, result 对象, 置顶下标/None)
+        self._rerank_lock = threading.Lock()
         self._last_key_ts = 0.0
         self.on_change = None  # 回调, 参数为状态 dict
 
@@ -56,11 +60,49 @@ class InputController:
         self.page = 0  # 编码变了, 回到第一页
 
     def settle_rerank(self):
-        """打字停顿后补一次带重排的解码(客户端空闲心跳调用)。"""
-        if self._rerank_pending and self.buffer:
-            self._decode(rerank=True)
-            self._rerank_pending = False
+        """打字停顿后, 后台线程补一次重排(主线程零等待)。
+
+        神经重排对长句可达秒级(25M 模型), 放主线程会把整个客户端卡死——
+        v2.0.0-alpha.11 的"卡住"即此。算完由 poll_rerank 应用: 缓冲已变
+        (用户继续打字/已选词)则丢弃。同一时刻至多一个重排线程。
+        """
+        if not (self._rerank_pending and self.buffer
+                and self.engine.reranker is not None):
+            return
+        with self._rerank_lock:
+            if self._rerank_busy:
+                return
+            self._rerank_busy = True
+        res, buf, ctx = self.result, self.buffer, self.committed[-64:]
+        self._rerank_pending = False
+
+        def work():
+            try:
+                idx = self.engine.rerank_candidates(res, ctx)
+            except Exception:
+                idx = None
+            self._rerank_done = (buf, res, idx)
+            with self._rerank_lock:
+                self._rerank_busy = False
+
+        threading.Thread(target=work, daemon=True, name="iris-rerank").start()
+
+    def poll_rerank(self):
+        """取回后台重排结果; 缓冲未变才换头并通知视图。返回是否有变化。"""
+        done = self._rerank_done
+        if done is None:
+            return False
+        self._rerank_done = None
+        buf, res, idx = done
+        if idx is None or buf != self.buffer or self.result is not res:
+            return False
+        cands = res.candidates
+        if 0 < idx < len(cands):
+            cands[0], cands[idx] = cands[idx], cands[0]
+            self.page = 0
             self._notify()
+            return True
+        return False
 
     @property
     def page_candidates(self):
@@ -209,7 +251,14 @@ class ImeApp:
         hint.pack(fill="x", padx=14, pady=4)
 
         r.bind("<Key>", self.on_key)
+        self._poll_rerank()
         self.render({})
+
+    def _poll_rerank(self):
+        # 后台重排结果落地(打字板没有 _tick 心跳, 自建 120ms 轮询)
+        if self.controller.poll_rerank():
+            self.render({})
+        self.root.after(120, self._poll_rerank)
 
     # ---- 视图更新 ----
 

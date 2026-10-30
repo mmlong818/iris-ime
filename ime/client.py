@@ -223,6 +223,7 @@ class WinClient(GlobalIme):
             if toggled:
                 self.icon.update_menu()
         self.controller.settle_rerank()
+        self.controller.poll_rerank()  # 后台重排算完且缓冲未变 → 换头
         self._render()
         self.root.after(20, self._tick)
 

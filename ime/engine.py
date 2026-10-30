@@ -26,6 +26,9 @@ CHAR_EDGE_CAP_HEAD = 40 # 候选首段(i=0)与句尾跨度的单字数(用户选
 CAND_HEAD_COUNT = 10    # 生成候选时首段跨度的额外词条数
 MAX_CANDIDATES = 500    # 安全硬上限(防病态输入); 正常候选不受限, 翻页浏览
 PAGE_SIZE = 9
+RERANK_TOP = 8          # 分数序直入重排考虑集的条数
+RERANK_MAX = 24         # 考虑集上限: 评分成本 ~O(条数×字数), 长句全量(200 条)
+                        # 25M 模型曾达 94s, 是客户端卡死的根源
 
 
 @dataclass
@@ -401,19 +404,23 @@ class Engine:
             self._apply_rerank(result, n, context)
         return result
 
-    def _apply_rerank(self, result, n, context):
-        """神经重排: 候选单位是完整读法(preview), 不是首段。
+    def rerank_candidates(self, result, context):
+        """神经重排决策: 返回应置顶的候选下标, None 表示维持原序。
 
-        answers_key: 进入本函数时 remainder 已为空, 所有 preview 都完整覆盖
-        按键; 简拼边是预测性的, 不算应答。
+        候选单位是完整读法(preview), 不是首段。
+        answers_key: remainder 为空时所有 preview 都完整覆盖按键; 简拼边是
+        预测性的, 不算应答。
         trusted: leader 是"词典对整个按键的应答"时不重排——词典自带语料词频,
-        字级模型没有。判据: 首段单边覆盖全键且非简拼(词/字的精确命中, 以及
-        末音节补全——评测集里 "aizengfenmin"→爱憎分明 这类少打尾字母的情况,
-        补全边同样是词典应答; 不保护的话字级模型会把 418 个成语改坏); 另加
-        预览整体恰为键对应词典词的兜底。多边拼装的 leader(整句)不受保护,
-        重排收益正在这里。
+        字级模型没有。判据: 单个词典词/字的精确命中, 以及末音节补全——评测集
+        里 "aizengfenmin"→爱憎分明 这类少打尾字母的情况, 补全边同样是词典
+        应答, 不保护的话字级模型会把 418 个成语改坏; 另加预览整体恰为键对应
+        词典词的兜底。多边拼装的 leader(整句)不受保护, 重排收益正在这里。
+        考虑集: 12 nat 分数窗内, 前 RERANK_TOP 条(分数序)+ 等距采样补足到
+        RERANK_MAX——深位读法(书放在/硬编)不被分数序埋没, 又约束模型成本。
         """
         cands = result.candidates
+        if not (cands and self.reranker is not None and result.remainder == ""):
+            return None
         key_words = [w for w, _, _ in self.word_by_pinyin.get(result.key, [])]
 
         def trusted(c):
@@ -423,16 +430,20 @@ class Engine:
                 return True
             return c.preview in key_words
 
-        # 预筛: 只把路径分接近最优的候选送模型(12 nat 窗口——平衡
-        # 长句批量评分从 ~120 条降到数十条
-        if cands:
-            top_sc = cands[0].score
-            cands = [c for c in cands if c.score >= top_sc - 12.0] or cands[:9]
+        top_sc = cands[0].score
+        cands = [c for c in cands if c.score >= top_sc - 12.0] or cands[:9]
         facts = [(c.kind != "initial", trusted(c)) for c in cands]
-        # 考虑集: 前 3 条(分数序)+ 全列表等距采样 6 条, 共 9 条——
-        # 深位读法(书放在/硬编)也能获得模型评估, 不被分数序埋没
-        # 全量评分(桌面端停顿补评可承受): 深位金标(书放在)不再被
-        # 9 窗采样埋没; 门控仍拒绝可信 leader
-        idx = self.reranker.best_of_all(context, [c.preview for c in cands], facts)
+        sel = list(range(min(RERANK_TOP, len(cands))))
+        if len(cands) > RERANK_TOP:
+            rest = list(range(RERANK_TOP, len(cands)))
+            step = max(1, -(-len(rest) // (RERANK_MAX - RERANK_TOP)))
+            sel += rest[::step]
+        idx = self.reranker.best_of_all(context, [cands[i].preview for i in sel],
+                                        [facts[i] for i in sel])
+        return sel[idx] if idx is not None else None
+
+    def _apply_rerank(self, result, n, context):
+        idx = self.rerank_candidates(result, context)
         if idx is not None:
+            cands = result.candidates
             cands[0], cands[idx] = cands[idx], cands[0]

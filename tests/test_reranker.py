@@ -72,6 +72,66 @@ class RerankerTest(unittest.TestCase):
         finally:
             self.engine.reranker = self.reranker
 
+    def test_consideration_set_capped(self):
+        # 长句 200 候选全量评分曾达 94s(25M), 客户端卡死根源——
+        # 送模型的候选必须封顶, 且等距采样保住深位读法
+        from ime.engine import RERANK_MAX
+        scored = []
+        target = self.engine.reranker.model  # 引擎实际持有的模型实例
+        real_score = target.score
+
+        def spy(context, texts):
+            scored.append(len(texts))
+            return real_score(context, texts)
+
+        target.score = spy
+        try:
+            r = self.engine.decode("yizhiyigeyizhideyizhidouzaishuozenmeban")
+        finally:
+            target.score = real_score
+        self.assertTrue(scored and scored[-1] <= RERANK_MAX)
+
+    def test_async_rerank_does_not_block_and_guards_stale(self):
+        # 停顿补排必须发生在后台线程, 且缓冲已变时结果被丢弃
+        import threading
+        import time as _t
+        from ime.app import InputController
+
+        ctl = InputController(engine=self.engine, learn=False)
+        main_thread = threading.current_thread()
+        seen_threads = []
+        real = self.engine.rerank_candidates
+
+        def slow_rerank(result, context):
+            seen_threads.append(threading.current_thread())
+            _t.sleep(0.2)
+            return real(result, context)
+
+        self.engine.rerank_candidates = slow_rerank
+        for ch in "tabashufang":
+            ctl.feed_key(ch, ch)
+        t0 = _t.perf_counter()
+        ctl.settle_rerank()
+        self.assertLess(_t.perf_counter() - t0, 0.1, "settle_rerank 阻塞了主线程")
+        self.assertIsNone(ctl._rerank_done)
+        ctl.poll_rerank()  # 线程还在跑: 不动
+        self.assertIsNone(ctl._rerank_done)
+        _t.sleep(0.4)
+        ctl.poll_rerank()
+        self.assertIn("他把书", ctl.result.candidates[0].preview)
+        self.assertTrue(any(t is not main_thread for t in seen_threads))
+
+        # 缓冲已变 → 旧结果丢弃, 不串到新组合
+        for ch in "ni":
+            ctl.feed_key(ch, ch)
+        ctl.feed_key("Escape")
+        for ch in "nihao":
+            ctl.feed_key(ch, ch)
+        ctl.settle_rerank()
+        _t.sleep(0.5)
+        ctl.poll_rerank()
+        self.assertIn("你好", ctl.result.candidates[0].preview)
+
 
 if __name__ == "__main__":
     unittest.main()
