@@ -3,7 +3,7 @@
 
 #define MyAppName "鸢尾输入法"
 #define MyAppNameEn "Iris IME"
-#define MyAppVersion "2.0.0.14"
+#define MyAppVersion "2.0.0.15"
 #define MyAppExeName "IrisIME.exe"
 
 [Setup]
@@ -15,7 +15,7 @@ DefaultDirName={autopf}\IrisIME
 DefaultGroupName={#MyAppName}
 PrivilegesRequired=admin
 OutputDir=.
-OutputBaseFilename=IrisIME-Setup-v2.0.0-alpha.14
+OutputBaseFilename=IrisIME-Setup-v2.0.0-alpha.15
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

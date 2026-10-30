@@ -136,11 +136,13 @@ def send_vk(vk):
 
 
 def caret_screen_pos():
-    """定位输入光标, 返回 (x, y_bottom, y_top) 屏幕坐标; 失败返回 None。
+    """定位输入光标, 返回 (x, y_bottom, y_top, src) 屏幕坐标; 失败返回 None。
 
-    三级链: 经典 caret(GetGUIThreadInfo, 记事本/EDIT 控件) →
+    四级链: 经典 caret(GetGUIThreadInfo, 记事本/EDIT 控件) →
     MSAA 无障碍光标(AccessibleObjectFromWindow OBJID_CARET,
-    Chrome/Edge/Office 等现代应用) → None(调用方用记忆位置兜底)。
+    Chrome/Edge/Office 等现代应用) → UIA 文字选区 → 焦点元素矩形。
+    src 标记来源层(classic/msaa/uia_sel/field)——同一光标不同层给出的
+    矩形可能差半行到一整框, 调用方做层粘性防"候选框乱跑"。
     """
     info = GUITHREADINFO()
     info.cb = ctypes.sizeof(GUITHREADINFO)
@@ -153,19 +155,19 @@ def caret_screen_pos():
         if user32.MapWindowPoints(info.hwndCaret, None, ctypes.byref(pt), 1):
             top = wintypes.POINT(rc.left, rc.top)
             user32.MapWindowPoints(info.hwndCaret, None, ctypes.byref(top), 1)
-            return pt.x, pt.y, top.y
+            return pt.x, pt.y, top.y, "classic"
 
     if info.hwndFocus:
         pos = _msaa_caret_pos(info.hwndFocus)
         if pos:
-            return pos
+            return pos[0], pos[1], pos[2], "msaa"
 
     # 终极通道 1: UIA 文字选区(Chromium/WPF/WinUI 等现代应用)
     try:
         from .uia_caret import uia_caret_rect
         pos = uia_caret_rect()
         if pos:
-            return pos
+            return pos[0], pos[1], pos[2], "uia_sel"
     except Exception:
         pass
     # 终极通道 2: 焦点元素矩形(微信等封闭自绘 UI 给不出光标,
@@ -174,7 +176,7 @@ def caret_screen_pos():
         from .uia_caret import uia_focused_rect
         pos = uia_focused_rect()
         if pos:
-            return pos
+            return pos[0], pos[1], pos[2], "field"
     except Exception:
         pass
     return None
@@ -515,8 +517,13 @@ class GlobalIme:
         self.root.bind("<B1-Motion>", self._drag_motion)
         self.root.bind("<ButtonRelease-1>", self._drag_end)
         self._caret_ts = 0.0      # 光标查询节流
-        self._last_anchor = None  # 最近一次光标位置 (x, y_bottom, y_top)
+        self._last_anchor = None  # 最近一次光标位置 (x, y_bottom, y_top, src)
+        self._anchor_src = None   # 本组合采信的定位层(层粘性, 防层间拍动)
+        self._src_miss = 0        # 惯用层之外的连续样本数
         self._last_geo = ""
+        self._caret_log = None    # 诊断日志路径(懒建)
+        if error_log_path:
+            self._caret_log = Path(error_log_path).parent / "caret_debug.log"
         self.controller.on_change = lambda s: None  # 渲染由 _tick 统一驱动
         self.root.after(20, self._tick)
 
@@ -751,6 +758,21 @@ class GlobalIme:
         b = t + user32.GetSystemMetrics(79)
         return l - 100 <= x <= r + 100 and t - 100 <= yb <= b + 100
 
+    def _caret_debug(self, event, src, pos, extra=""):
+        """定位决策诊断(体积小: 只记换层/拒绝/换源事件, 恒开)。
+        用户报"乱跑"时此日志可定位到具体应用与层。"""
+        if not self._caret_log:
+            return
+        try:
+            if not self._caret_log.exists() or \
+                    self._caret_log.stat().st_size > 1_000_000:
+                self._caret_log.write_text("", encoding="utf-8")  # 截断轮转
+            with open(self._caret_log, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} {event} src={src} "
+                        f"pos={pos} {extra}\n")
+        except OSError:
+            pass
+
     def _place(self):
         w, h = self._win_w, self._win_h
         if self._dragging:
@@ -764,21 +786,49 @@ class GlobalIme:
                 self._caret_ts = now
                 pos = caret_screen_pos()
                 if pos and self._sane_anchor(pos):
-                    if first_sample or buf_len == self._last_buf_len:
-                        # 新组合首针无条件采信(旧锚点属于上一个组合);
-                        # 未打新字时位置变化=用户点击移光标, 也采信
+                    src = pos[3]
+                    if first_sample or self._anchor_src is None:
+                        # 新组合首针无条件采信(旧锚点属于上一个组合)
                         self._last_anchor = pos
-                    else:
+                        if self._anchor_src != src:
+                            self._caret_debug("adopt", src, pos,
+                                              f"first={first_sample}")
+                        self._anchor_src = src
+                        self._src_miss = 0
+                    elif src == self._anchor_src:
+                        # 惯用层: 未打新字时位置变化=用户点击移光标, 采信;
+                        # 打字中大跳丢弃(MSAA 对部分应用返回整窗矩形等脏数据)
                         prev = self._last_anchor
                         jumped = (prev and abs(pos[0] - prev[0]) > 600
                                   and abs(pos[1] - prev[1]) > 300)
-                        if not jumped:
+                        if buf_len == self._last_buf_len or not jumped:
                             self._last_anchor = pos
-                        # 打字中大跳: 丢弃(MSAA 对部分应用返回整窗矩形等脏数据)
+                        elif jumped:
+                            self._caret_debug("drop-jump", src, pos)
+                    else:
+                        # 异层样本: 默认拒绝(层间拍动=乱跑的典型来源);
+                        # 靠近现锚点(60px)视为同位, 放宽采信; 惯用层连续
+                        # 3 针失手才允许换层
+                        near = (self._last_anchor
+                                and abs(pos[0] - self._last_anchor[0]) <= 60
+                                and abs(pos[1] - self._last_anchor[1]) <= 60)
+                        self._src_miss += 1
+                        if near or self._src_miss >= 3:
+                            self._caret_debug(
+                                "switch" if not near else "adopt-near",
+                                src, pos, f"from={self._anchor_src}")
+                            self._last_anchor = pos
+                            self._anchor_src = src
+                            self._src_miss = 0
+                        else:
+                            self._caret_debug("drop-layer", src, pos,
+                                              f"keep={self._anchor_src}")
+                elif pos:
+                    self._caret_debug("drop-sane", pos[3], pos)
             self._last_buf_len = buf_len
         anchor = self._last_anchor if self.controller.buffer else None
         if anchor:
-            from_field = len(anchor) == 4 and anchor[3]
+            from_field = anchor[3] == "field"
             x, y_bottom, y_top = anchor[0], anchor[1], anchor[2]
             area = monitor_work_area(x, y_bottom)
             if from_field:
@@ -794,7 +844,7 @@ class GlobalIme:
             # 拿不到光标: 沿用最近一次文字光标位置(粘性)——用户明确要求
             # 跟随的是文字光标而非鼠标, 鼠标兜底已移除
             if self._last_anchor:
-                x, y_bottom, y_top = self._last_anchor
+                x, y_bottom, y_top = self._last_anchor[:3]
                 area = monitor_work_area(x, y_bottom)
                 y = y_bottom + 2
                 if y + h > area[3]:
@@ -811,6 +861,8 @@ class GlobalIme:
         else:
             self._comp_mouse_anchor = None
             self._last_buf_len = 0    # 组合结束, 重置采样基线
+            self._anchor_src = None
+            self._src_miss = 0
             if self._idle_pos:
                 x, y = self._idle_pos            # 用户拖过的停靠位优先
                 area = monitor_work_area(x, y)
