@@ -17,7 +17,7 @@ import tkinter as tk
 from .engine import PAGE_SIZE, Engine
 from .textstyle import space_text  # 可选能力, 默认关闭(auto_space=False)
 
-KEY_HINT = ("字母=编码 · 空格/回车=上屏中文 · 数字=选词 · 双击退格=单字模式 · "
+KEY_HINT = ("字母=编码 · 空格/回车=上屏中文 · 数字=选词 · Ctrl+退格=单字模式 · "
             "Esc=清空 · 退格=删编码")
 
 
@@ -45,9 +45,7 @@ class InputController:
         self.last_commit = ""
         self.page = 0          # 候选页码(0 起)
         self.page_size = PAGE_SIZE
-        self.char_mode = False  # 单字模式: 候选把单字提到最前(词表外组词)
-        self._bs_ts = 0.0       # 上次退格时刻(双击检测)
-        self._bs_restored = ""  # 双击还原: 第一次退格删掉的字母
+        self.char_mode = False  # 单字模式: 解码截首音节, 逐字组词
         self._rerank_pending = False   # 打字中挂起重排, 停顿后补
         self._rerank_busy = False      # 后台重排线程在跑
         self._rerank_done = None       # (缓冲快照, result 对象, 置顶下标/None)
@@ -186,29 +184,24 @@ class InputController:
     def feed_key(self, keysym, char=""):
         """处理一次按键, 返回是否产生了状态变化。"""
         changed = True
-        if keysym == "BackSpace":
-            now = time.monotonic()
-            if self.buffer and now - self._bs_ts <= 0.45:
-                # 双击退格: 切换单字模式, 并还原第一次退格删掉的字母——
-                # 词表外两字词不用翻页确认, 直接逐字选
-                if self._bs_restored:
-                    self.buffer += self._bs_restored
-                    self._bs_restored = ""
+        if keysym == "Control-BackSpace":
+            # 单字模式开关(组词中才有意义)。双击退格方案废弃: 快速连删
+            # 每秒 5-10 下全落进双击窗口, 实测退格删不掉字——时序类
+            # 手势不能跟"连删"这个基本操作抢键
+            if self.buffer:
                 self.char_mode = not self.char_mode
-                self._bs_ts = 0.0
                 self._decode(rerank=False)
                 self._rerank_pending = False
             else:
-                self._bs_ts = now if self.buffer else 0.0
-                self._bs_restored = ""
-                if self.buffer:
-                    self._bs_restored = self.buffer[-1]
-                    self.buffer = self.buffer[:-1]
-                    self._decode(rerank=False)
-                    self._rerank_pending = True
-                    self._last_key_ts = now
-                else:
-                    changed = False
+                changed = False
+        elif keysym == "BackSpace":
+            if self.buffer:
+                self.buffer = self.buffer[:-1]
+                self._decode(rerank=False)
+                self._rerank_pending = True
+                self._last_key_ts = time.monotonic()
+            else:
+                changed = False
         elif keysym == "Escape":
             self.buffer = ""
             self._decode()
@@ -336,7 +329,10 @@ class ImeApp:
         self.controller._notify()
 
     def on_key(self, event):
-        self.controller.feed_key(event.keysym, event.char)
+        keysym = event.keysym
+        if keysym == "BackSpace" and event.state & 0x4:  # ControlMask
+            keysym = "Control-BackSpace"                 # 单字模式开关
+        self.controller.feed_key(keysym, event.char)
 
 
 def main():

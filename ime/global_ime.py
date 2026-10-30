@@ -441,6 +441,12 @@ class KeyboardHook:
             if composing and vk == 0x1B:      # Escape
                 self.events.put(("key", "Escape", ""))
                 return 1
+        elif is_down and vk == 0x08 and self._down(VK_CONTROL) and composing:
+            # Ctrl+BackSpace = 单字模式开关(仅组词中; 空编码原生放行,
+            # 不影响其他应用的"删词")。双击退格方案废弃——快速连删
+            # 每秒 5-10 下全落进双击窗口, 实测退格删不掉字
+            self.events.put(("key", "Control-BackSpace", ""))
+            return 1
         return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
 
 

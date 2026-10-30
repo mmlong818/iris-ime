@@ -26,31 +26,39 @@ class CharModeTest(unittest.TestCase):
         for ch in s:
             self.ctl.feed_key(ch, ch)
 
-    def _double_backspace(self):
-        self.ctl.feed_key("BackSpace")
-        self.ctl.feed_key("BackSpace")
+    def _ctrl_backspace(self):
+        self.ctl.feed_key("Control-BackSpace")
 
-    def test_single_backspace_still_deletes(self):
-        self._type("yingb")
+    def test_backspace_always_deletes(self):
+        # 回归: 双击退格方案把快速连删劫持成模式切换, 退格删不掉字——
+        # 退格现在必须是纯删除, 多快都不受时序影响
+        self._type("yingbian")
+        for _ in range(3):
+            self.ctl.feed_key("BackSpace")
+        self.assertEqual(self.ctl.buffer, "yingb")
+        self.assertFalse(self.ctl.char_mode)
+        time.sleep(0.5)
         self.ctl.feed_key("BackSpace")
         self.assertEqual(self.ctl.buffer, "ying")
-        self.assertFalse(self.ctl.char_mode)
 
-    def test_double_backspace_enters_char_mode(self):
+    def test_ctrl_backspace_enters_char_mode(self):
         self._type("yingbian")
-        self._double_backspace()
+        self._ctrl_backspace()
         self.assertTrue(self.ctl.char_mode)
-        # 解码截到首音节: 候选是单字, 且还原了第一次退格删掉的字母
+        # 解码截到首音节: 候选是单字, 缓冲原封不动
         self.assertEqual(self.ctl.buffer, "yingbian")
         c0 = self.ctl.result.candidates[0]
         self.assertEqual(len(c0.text), 1)
         self.assertEqual(c0.commit_end, 4)  # ying
 
-    def test_double_backspace_toggles_off(self):
+    def test_ctrl_backspace_toggles_off(self):
         self._type("ying")
-        self._double_backspace()
-        self._double_backspace()
-        self.assertFalse(self.ctl.char_mode)  # 恢复整条读法语义
+        self._ctrl_backspace()
+        self._ctrl_backspace()
+        self.assertFalse(self.ctl.char_mode)
+
+    def test_ctrl_backspace_noop_without_buffer(self):
+        self.assertFalse(self.ctl.feed_key("Control-BackSpace"))
 
     def _select_char(self, ch):
         idx = next(i for i, c in enumerate(self.ctl.result.candidates)
@@ -60,7 +68,7 @@ class CharModeTest(unittest.TestCase):
     def test_char_mode_persists_across_selection(self):
         # 逐字选: 硬 → 缓冲剩 bian, 第二个音节仍是单字
         self._type("yingbian")
-        self._double_backspace()
+        self._ctrl_backspace()
         self._select_char("硬")
         self.assertTrue(self.ctl.char_mode)
         self.assertEqual(self.ctl.buffer, "bian")
@@ -71,26 +79,18 @@ class CharModeTest(unittest.TestCase):
     def test_compose_learn_after_char_flow(self):
         # 单字模式选 硬+编 后, 3 秒合成词学习应记住 硬编
         self._type("yingbian")
-        self._double_backspace()
+        self._ctrl_backspace()
         self._select_char("硬")
         self._select_char("编")
         self.assertIn("硬编", self.engine.user_counts)
 
     def test_char_mode_resets_when_buffer_empties(self):
         self._type("ying")
-        self._double_backspace()
+        self._ctrl_backspace()
         self.ctl.feed_key("Escape")
         self.assertFalse(self.ctl.char_mode)
         self._type("ni")
         self.assertFalse(self.ctl.char_mode)  # 不跨组合
-
-    def test_slow_backspaces_do_not_toggle(self):
-        self._type("ying")
-        self.ctl.feed_key("BackSpace")
-        time.sleep(0.5)
-        self.ctl.feed_key("BackSpace")
-        self.assertFalse(self.ctl.char_mode)
-        self.assertEqual(self.ctl.buffer, "yi")
 
     def test_rerank_skipped_in_char_mode(self):
         # settle_rerank 在单字模式下不启动(模型偏爱词组, 会挤掉点名要的单字)
@@ -102,7 +102,7 @@ class CharModeTest(unittest.TestCase):
         try:
             self._type("yingbian")
             self.ctl._rerank_pending = True
-            self._double_backspace()
+            self._ctrl_backspace()
             self.ctl.settle_rerank()
             self.ctl.poll_rerank()
         finally:
