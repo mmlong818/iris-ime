@@ -634,6 +634,8 @@ class GlobalIme:
         mode = "中" if enabled else "英"
         if self.state.get("caps"):
             mode += " · Caps 直通"
+        if self.controller.char_mode:
+            mode += " · 单字"
         page = (f"  {self.controller.page + 1}/{self.controller.page_count}"
                 if buf and self.controller.page_count > 1 else "")
         status = tk.Label(self.rows, font=f_status, fg=self.C_GRAY, bg=self.C_BG)

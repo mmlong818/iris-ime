@@ -17,7 +17,8 @@ import tkinter as tk
 from .engine import PAGE_SIZE, Engine
 from .textstyle import space_text  # 可选能力, 默认关闭(auto_space=False)
 
-KEY_HINT = "字母=编码 · 空格/回车=上屏中文 · 数字=选词 · Esc=清空 · 退格=删编码"
+KEY_HINT = ("字母=编码 · 空格/回车=上屏中文 · 数字=选词 · 双击退格=单字模式 · "
+            "Esc=清空 · 退格=删编码")
 
 
 class InputController:
@@ -44,6 +45,9 @@ class InputController:
         self.last_commit = ""
         self.page = 0          # 候选页码(0 起)
         self.page_size = PAGE_SIZE
+        self.char_mode = False  # 单字模式: 候选把单字提到最前(词表外组词)
+        self._bs_ts = 0.0       # 上次退格时刻(双击检测)
+        self._bs_restored = ""  # 双击还原: 第一次退格删掉的字母
         self._rerank_pending = False   # 打字中挂起重排, 停顿后补
         self._rerank_busy = False      # 后台重排线程在跑
         self._rerank_done = None       # (缓冲快照, result 对象, 置顶下标/None)
@@ -53,10 +57,20 @@ class InputController:
 
     def _decode(self, rerank=True):
         if self.buffer:
-            self.result = self.engine.decode(self.buffer, context=self.committed[-64:],
-                                             rerank=rerank)
+            if self.char_mode:
+                # 单字模式: 解码截到首音节——候选全是单字, 选中只上屏
+                # 一个字, 余下编码留缓冲(逐字组词, 3 秒合成词学习接住)。
+                # 不做神经重排: 模型偏爱词组, 会挤掉用户点名要的单字。
+                k = self.engine.first_syllable(self.buffer)
+                seg = self.buffer[:k] if k else self.buffer
+                self.result = self.engine.decode(seg, context=self.committed[-64:],
+                                                 rerank=False)
+            else:
+                self.result = self.engine.decode(self.buffer, context=self.committed[-64:],
+                                                 rerank=rerank)
         else:
             self.result = None
+            self.char_mode = False  # 新组合开始, 单字模式不跨组合
         self.page = 0  # 编码变了, 回到第一页
 
     def settle_rerank(self):
@@ -66,7 +80,7 @@ class InputController:
         v2.0.0-alpha.11 的"卡住"即此。算完由 poll_rerank 应用: 缓冲已变
         (用户继续打字/已选词)则丢弃。同一时刻至多一个重排线程。
         """
-        if not (self._rerank_pending and self.buffer
+        if not (self._rerank_pending and self.buffer and not self.char_mode
                 and self.engine.reranker is not None):
             return
         with self._rerank_lock:
@@ -93,6 +107,8 @@ class InputController:
         if done is None:
             return False
         self._rerank_done = None
+        if self.char_mode:
+            return False  # 单字模式下不换头(模型偏爱词组)
         buf, res, idx = done
         if idx is None or buf != self.buffer or self.result is not res:
             return False
@@ -133,6 +149,7 @@ class InputController:
             "preview": cands[0].preview if cands else "",
             "remainder": self.result.remainder if self.result else "",
             "output": self.output,
+            "char_mode": self.char_mode,
         })
 
     def _commit(self, text, key="", kind=""):
@@ -170,13 +187,28 @@ class InputController:
         """处理一次按键, 返回是否产生了状态变化。"""
         changed = True
         if keysym == "BackSpace":
-            if self.buffer:
-                self.buffer = self.buffer[:-1]
+            now = time.monotonic()
+            if self.buffer and now - self._bs_ts <= 0.45:
+                # 双击退格: 切换单字模式, 并还原第一次退格删掉的字母——
+                # 词表外两字词不用翻页确认, 直接逐字选
+                if self._bs_restored:
+                    self.buffer += self._bs_restored
+                    self._bs_restored = ""
+                self.char_mode = not self.char_mode
+                self._bs_ts = 0.0
                 self._decode(rerank=False)
-                self._rerank_pending = True
-                self._last_key_ts = time.monotonic()
+                self._rerank_pending = False
             else:
-                changed = False
+                self._bs_ts = now if self.buffer else 0.0
+                self._bs_restored = ""
+                if self.buffer:
+                    self._bs_restored = self.buffer[-1]
+                    self.buffer = self.buffer[:-1]
+                    self._decode(rerank=False)
+                    self._rerank_pending = True
+                    self._last_key_ts = now
+                else:
+                    changed = False
         elif keysym == "Escape":
             self.buffer = ""
             self._decode()
@@ -268,7 +300,8 @@ class ImeApp:
         if buf or cands:
             page_note = (f"  第{self.controller.page + 1}/{self.controller.page_count}页"
                          if self.controller.page_count > 1 else "")
-            text = f"{buf} → {preview}{'▏' + remainder if remainder else ''}{page_note}"
+            char_note = "  [单字]" if self.controller.char_mode else ""
+            text = f"{buf} → {preview}{'▏' + remainder if remainder else ''}{char_note}{page_note}"
         else:
             text = "在此直接打字(切到英文键盘)"
         self.preedit.configure(text=text)

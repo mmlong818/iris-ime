@@ -302,6 +302,17 @@ class Engine:
 
     # ---------- 解码 ----------
 
+    def first_syllable(self, P: str) -> int:
+        """P 的最长合法音节前缀长度(模糊音归一后匹配; 无则 0)。
+
+        单字模式(客户端双击退格)用它把解码截到首音节——候选全是
+        该音节的单字, 选中只上屏一个字, 余下编码留在缓冲逐字组词。
+        """
+        for k in range(min(len(P), 6), 0, -1):
+            if P[:k] in self.syl_set or P[:k] in self.syl_canon:
+                return k
+        return 0
+
     def decode(self, raw: str, context: str = "", rerank: bool = True) -> DecodeResult:
         """context: 已上屏文本, 供重排序模型做条件打分(未挂载时忽略)。
         rerank=False: 跳过神经重排(快速打字时用, 停顿后补一次)。"""
