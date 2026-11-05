@@ -30,6 +30,7 @@ from ctypes import wintypes
 from .app import InputController
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 ole32 = ctypes.OleDLL("ole32")
 oleacc = ctypes.OleDLL("oleacc")
 
@@ -133,6 +134,32 @@ def send_vk(vk):
     events[1].type = INPUT_KEYBOARD
     events[1].ki = KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, None)
     user32.SendInput(2, events, ctypes.sizeof(INPUT))
+
+
+def foreground_exe():
+    """前台窗口所属进程的 exe 名(小写), 如 "uuremote.exe"; 失败返回 None。
+
+    远程桌面/云游戏类客户端会把键盘捕获转发给远端, 本地注入的 Unicode
+    文本到不了远端——这类应用需要整输入法直通(按键原生透传)。"""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    if not pid.value:
+        return None
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    h = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return None
+    try:
+        buf = ctypes.create_unicode_buffer(520)
+        size = wintypes.DWORD(520)
+        if kernel32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return buf.value.rsplit("\\", 1)[-1].lower()
+    finally:
+        kernel32.CloseHandle(h)
+    return None
 
 
 def caret_screen_pos():
@@ -349,6 +376,14 @@ class KeyboardHook:
     def _down(self, vk):
         return user32.GetAsyncKeyState(vk) & 0x8000
 
+    def _pt_exe(self):
+        """前台应用命中直通白名单则返回其 exe 名, 否则 None(可测)。"""
+        pt = self.state.get("passthrough")
+        if not pt:
+            return None
+        exe = foreground_exe()
+        return exe if exe and exe in pt else None
+
     def _callback(self, ncode, wparam, lparam):
         try:
             return self._handle(ncode, wparam, lparam)
@@ -401,6 +436,16 @@ class KeyboardHook:
 
         if not self.state["enabled"]:
             return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+
+        # 前台应用直通: 远程桌面/云游戏等把键盘转发给远端, 本地注入的
+        # Unicode 文本到不了远端——IME 整体静默放行, 按键原生透传,
+        # 由远端机器自己的输入法组词。组词中切进直通应用则清空编码。
+        if self._pt_exe():
+            if self.state.get("buffer") and not self.state.get("pt_cleared"):
+                self.state["pt_cleared"] = True
+                self.events.put(("passthrough", None, ""))
+            return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+        self.state["pt_cleared"] = False
 
         # Caps Lock 开启 = 字母直通英文(与主流输入法一致), 供状态条显示
         self.state["caps"] = bool(user32.GetKeyState(0x14) & 0x0001)
@@ -459,7 +504,9 @@ class GlobalIme:
         self.controller = InputController(model_path=model_path, user_path=user_path,
                                           auto_space=auto_space, space_digits=space_digits,
                                           fuzzy=fuzzy)
-        self.state = {"enabled": False, "buffer": "", "shift_armed": False}
+        self.state = {"enabled": False, "buffer": "", "shift_armed": False,
+                      "passthrough": set()}
+        self.last_fg_app = None  # 最近前台应用进程名(托盘"直通"菜单用)
         self.events = queue.Queue()
         self.hook = KeyboardHook(self.events, self.state, allow_injected=selftest,
                                  error_log_path=error_log_path)
@@ -529,9 +576,14 @@ class GlobalIme:
 
     # ---- 钩子看门狗 ----
 
+    def on_fg_app_changed(self):
+        """前台应用变化回调(client 覆写以刷新托盘菜单标签)。"""
+
     def _watchdog(self):
         """Windows 会静默摘除无响应的 LL 钩子(用户报过'突然失效')。
-        每 5 秒注入一个保留键码探针; 钩子活着就会更新心跳, 死了就重装。"""
+        每 5 秒注入一个保留键码探针; 钩子活着就会更新心跳, 死了就重装。
+        顺带做前台应用追踪(所有 tick 路径共用)。"""
+        self._track_foreground()
         now = time.time()
         if now - self._last_probe < 5.0:
             return
@@ -566,6 +618,11 @@ class GlobalIme:
                 kind, keysym, ch = self.events.get_nowait()
                 if kind == "toggle":
                     self._toast_until = time.time() + 0.9  # 切换大字提示
+                elif kind == "passthrough":
+                    # 前台应用直通: 清掉组词中的编码(按键已原生透传)
+                    if self.controller.buffer:
+                        self.controller.feed_key("Escape")
+                        self._flush_output()
                 else:
                     self.controller.feed_key(keysym, ch)
                     self._flush_output()
@@ -574,6 +631,19 @@ class GlobalIme:
         self.controller.settle_rerank()
         self.controller.poll_rerank()  # 后台重排算完且缓冲未变 → 换头
         self._render()
+
+    def _track_foreground(self):
+        """每 1.5s 记一次前台应用进程名(托盘"直通"菜单显示用)。"""
+        now = time.monotonic()
+        if now - getattr(self, "_fg_ts", 0.0) < 1.5:
+            return
+        self._fg_ts = now
+        exe = foreground_exe()
+        if exe and exe != Path(sys.executable).name.lower():
+            if exe != self.last_fg_app:
+                self.last_fg_app = exe
+                self.state["last_fg_app"] = exe
+                self.on_fg_app_changed()
         self.root.after(20, self._tick)
 
     def _click_select(self, abs_idx):
@@ -649,6 +719,8 @@ class GlobalIme:
             mode += " · Caps 直通"
         if self.controller.char_mode:
             mode += " · 单字"
+        if self.last_fg_app and self.last_fg_app in self.state.get("passthrough", ()):
+            mode += f" · {self.last_fg_app} 直通"
         page = (f"  {self.controller.page + 1}/{self.controller.page_count}"
                 if buf and self.controller.page_count > 1 else "")
         status = tk.Label(self.rows, font=f_status, fg=self.C_GRAY, bg=self.C_BG)

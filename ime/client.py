@@ -79,11 +79,12 @@ def tray_image(engaged=False):
 
 class WinClient(GlobalIme):
     def __init__(self):
-        self.settings = {"fuzzy": True, **load_settings()}
+        self.settings = {"fuzzy": True, "passthrough": [], **load_settings()}
         super().__init__(user_path=app_data_dir() / "user_words.json",
                          ui_settings_path=app_data_dir() / "ui.json",
                          fuzzy=self.settings.get("fuzzy", True),
                          error_log_path=app_data_dir() / "hook_errors.log")
+        self.state["passthrough"] = set(self.settings.get("passthrough", []))
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
@@ -111,6 +112,12 @@ class WinClient(GlobalIme):
                              radio=True, checked=lambda item: self.model_name == "25M"),
             pystray.MenuItem("模糊音", self._menu_fuzzy,
                              checked=lambda item: self.controller.engine.fuzzy),
+            pystray.MenuItem(
+                lambda item: ("直通: " + (self.last_fg_app or "切到目标应用后点这里")),
+                self._menu_passthrough,
+                checked=lambda item: bool(self.last_fg_app
+                                          and self.last_fg_app in
+                                          self.state.get("passthrough", set()))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("开机自启", self._menu_autostart,
                              checked=lambda item: autostart_enabled()),
@@ -132,6 +139,21 @@ class WinClient(GlobalIme):
 
     def _menu_fuzzy(self, icon, item):
         self.events.put(("fuzzy", None, ""))
+
+    def _menu_passthrough(self, icon, item):
+        """把最近前台应用加入/移出直通白名单(远程桌面等转发键盘的应用)。"""
+        exe = self.last_fg_app
+        if not exe:
+            return
+        lst = list(self.settings.get("passthrough", []))
+        if exe in lst:
+            lst.remove(exe)
+        else:
+            lst.append(exe)
+        self.settings["passthrough"] = lst
+        save_settings(self.settings)
+        self.state["passthrough"] = set(lst)   # 整体替换, 钩子线程读取安全
+        self.icon.update_menu()
 
     def _menu_autostart(self, icon, item):
         set_autostart(not autostart_enabled(), exe_path())
@@ -187,6 +209,10 @@ class WinClient(GlobalIme):
         if self.icon:
             self.icon.stop()
 
+    def on_fg_app_changed(self):
+        if self.icon:
+            self.icon.update_menu()  # 菜单标签显示新前台应用名
+
     def _tick(self):  # 覆写: 处理托盘菜单事件
         self._watchdog()
         toggled = False
@@ -197,6 +223,15 @@ class WinClient(GlobalIme):
                     # 状态已由钩子/菜单翻转, 这里只做提示——二次翻转会让按键失效
                     self._toast_until = time.time() + 0.9
                     toggled = True
+                elif kind == "passthrough":
+                    # 前台应用直通: 清掉组词中的编码(按键已原生透传)
+                    if self.controller.buffer:
+                        self.controller.feed_key("Escape")
+                        delta = self.controller.output
+                        if delta:
+                            self.controller.output = ""
+                            send_text(delta)
+                        self.state["buffer"] = self.controller.buffer
                 elif kind == "fuzzy":
                     self.controller.engine.fuzzy = not self.controller.engine.fuzzy
                     self.settings["fuzzy"] = self.controller.engine.fuzzy
