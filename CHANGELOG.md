@@ -1,5 +1,14 @@
 # 更新日志
 
+## v2.1.0-alpha.18 (2026-11-09)
+
+- **安装版内置语音**: ASR 增加双后端——开发态 funasr(torch GPU, RTF 0.03),
+  打包版 **funasr-onnx**(onnxruntime CPU, 量化 SenseVoice 内置在安装包,
+  实测稳态 0.14s/5.1s 音频); 排除的 kaldi_native_fbank 是 onnx 前端
+  必需(曾致冻结版 import 静默失败, --voice-selftest 诊断定位)
+- 冻结版语音自检命令 `IrisIME.exe --voice-selftest <wav>`(结果写
+  %APPDATA%\pinyin-ime\voice\voice_selftest.txt); 安装包 123MB→约 300MB
+
 ## v2.1.0-alpha.17 (2026-11-09)
 
 - **新增语音输入子系统 (ime/voice/, Phase 1)**:

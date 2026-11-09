@@ -420,6 +420,40 @@ def set_autostart(enable, path):
 
 
 def main():
+    if "--voice-selftest" in sys.argv:
+        # 冻结版语音自检: 转写指定 WAV, 结果写 voice_selftest.txt(窗口程序
+        # 无 stdout)。用法: IrisIME.exe --voice-selftest C:\path\to\test.wav
+        import traceback
+        from .voice.config import VoiceConfig, voice_data_dir
+        from .voice.asr_local import LocalASR
+        out = voice_data_dir() / "voice_selftest.txt"
+        try:
+            wav = sys.argv[sys.argv.index("--voice-selftest") + 1]
+            diag = []
+            for mod in ("funasr", "funasr_onnx", "sounddevice", "librosa",
+                        "onnxruntime"):
+                try:
+                    __import__(mod)
+                    diag.append(f"{mod}: OK")
+                except Exception as e:
+                    import traceback as _tb
+                    diag.append(f"{mod}: {e!r}\n{_tb.format_exc(limit=3)}")
+            with open(out, "w", encoding="utf-8") as f:
+                f.write("\n".join(diag) + "\n----\n")
+            cfg = VoiceConfig()
+            asr = LocalASR(cfg.asr)
+            t0 = time.time()
+            text = asr.transcribe(wav)
+            with open(out, "a", encoding="utf-8") as f:
+                f.write(f"backend={asr._backend} {time.time()-t0:.2f}s "
+                        f"text={text!r}\n")
+            sys.exit(0)
+        except SystemExit:
+            raise
+        except Exception:
+            with open(out, "a", encoding="utf-8") as f:
+                f.write("FAIL\n" + traceback.format_exc())
+            sys.exit(1)
     if "--selftest" in sys.argv:
         from .global_ime import selftest as hook_selftest
         sys.exit(hook_selftest())
