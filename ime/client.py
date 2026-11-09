@@ -85,18 +85,26 @@ class WinClient(GlobalIme):
                          fuzzy=self.settings.get("fuzzy", True),
                          error_log_path=app_data_dir() / "hook_errors.log")
         self.state["passthrough"] = set(self.settings.get("passthrough", []))
-        # 语音输入(v2.1): FunASR 本地转写 + GLM 润色; PTT 默认右 Ctrl
-        from .voice.config import VoiceConfig
-        from .voice.voice_ime import VoiceIme
-        self.vcfg = VoiceConfig()
-        self.voice = VoiceIme(self.vcfg,
-                              on_state=self._voice_state,
-                              on_output=self._voice_output)
-        self.state["voice_ptt"] = self.vcfg.ptt_vk
-        self.state["voice_enabled"] = self.vcfg.enabled
-        self.voice_win = None
-        if self.vcfg.enabled:
-            self.voice.preload()
+        # 语音输入(v2.1): FunASR 本地转写 + GLM 润色; PTT 默认右 Ctrl。
+        # 依赖 funasr/torch(数 GB), 打包版首期不带——缺失时优雅降级,
+        # 菜单置灰, 其余功能不受影响
+        self.vcfg = None
+        self.voice = None
+        try:
+            from .voice.config import VoiceConfig
+            from .voice.voice_ime import VoiceIme
+            self.vcfg = VoiceConfig()
+            self.voice = VoiceIme(self.vcfg,
+                                  on_state=self._voice_state,
+                                  on_output=self._voice_output)
+            self.state["voice_ptt"] = self.vcfg.ptt_vk
+            self.state["voice_enabled"] = self.vcfg.enabled
+            self.voice_win = None
+            if self.vcfg.enabled:
+                self.voice.preload()
+        except Exception as exc:
+            print(f"[client] 语音子系统不可用(打包版首期未内置): {exc}",
+                  file=sys.stderr)
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
@@ -126,8 +134,11 @@ class WinClient(GlobalIme):
                              checked=lambda item: self.controller.engine.fuzzy),
             pystray.MenuItem("语音输入 (按住右Ctrl)",
                              self._menu_voice,
-                             checked=lambda item: self.vcfg.enabled),
-            pystray.MenuItem("语音设置…", self._menu_voice_settings),
+                             enabled=lambda item: self.voice is not None,
+                             checked=lambda item: bool(self.voice and
+                                                       self.vcfg.enabled)),
+            pystray.MenuItem("语音设置…", self._menu_voice_settings,
+                             enabled=lambda item: self.voice is not None),
             pystray.MenuItem(
                 lambda item: ("直通: " + (self.last_fg_app or "切到目标应用后点这里")),
                 self._menu_passthrough,
@@ -157,10 +168,12 @@ class WinClient(GlobalIme):
         self.events.put(("fuzzy", None, ""))
 
     def _menu_voice(self, icon, item):
-        self.events.put(("voice", None, ""))
+        if self.voice:
+            self.events.put(("voice", None, ""))
 
     def _menu_voice_settings(self, icon, item):
-        self.events.put(("voice_settings", None, ""))
+        if self.voice:
+            self.events.put(("voice_settings", None, ""))
 
     # ---- 语音(主线程) ----
 
