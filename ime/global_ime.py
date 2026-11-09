@@ -434,6 +434,21 @@ class KeyboardHook:
         if is_down and vk not in SHIFT_VKS:
             self.state["shift_armed"] = False  # Shift 后跟了别的键, 不再算单击
 
+        # 语音 PTT(按住说话): 放在文字开关与 is_down 门之前——
+        # 语音有独立开关; 松手是 up 事件, 必须能到达这里。直通应用
+        # (远程桌面转发键盘)不劫持。L/R 变体都在配置里。长按自动重复
+        # 的 down 用 ptt_held 挡掉。
+        ptt = self.state.get("voice_ptt") or []
+        if vk in ptt and self.state.get("voice_enabled") and not self._pt_exe():
+            if is_down and not self.state.get("ptt_held"):
+                self.state["ptt_held"] = True
+                self.events.put(("voice_ptt_down", None, ""))
+                return 1
+            if not is_down and self.state.get("ptt_held"):
+                self.state["ptt_held"] = False
+                self.events.put(("voice_ptt_up", None, ""))
+                return 1
+
         if not self.state["enabled"]:
             return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
 
@@ -494,6 +509,53 @@ class KeyboardHook:
             # 每秒 5-10 下全落进双击窗口, 实测退格删不掉字
             self.events.put(("key", "Control-BackSpace", ""))
             return 1
+        return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+
+
+class MouseHook:
+    """WH_MOUSE_LL 骨架(Phase 2 接线: 鼠标侧键 XBUTTON1/2 作语音 PTT)。
+
+    与 KeyboardHook 同款结构: 后台线程消息泵 + 看门狗心跳 + 回调异常放行。
+    Phase 1 不启动, 只保证结构就位。"""
+
+    WH_MOUSE_LL = 14
+    WM_XBUTTONDOWN = 0x020B
+    WM_XBUTTONUP = 0x020C
+
+    def __init__(self, events, state, error_log_path=None):
+        self.events = events
+        self.state = state
+        self.error_log_path = error_log_path
+        self.last_event_ts = time.time()
+        self._hook = None
+        self._proc = None
+        self._thread = None
+
+    def start(self):
+        import ctypes
+        self._proc = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_int, ctypes.c_uint,
+            ctypes.POINTER(ctypes.c_void_p))(self._callback)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._hook and self._thread and self._thread.ident:
+            user32.PostThreadMessageW(self._thread.ident, 0x0012, 0, 0)  # WM_QUIT
+
+    def _run(self):
+        import ctypes
+        self._hook = user32.SetWindowsHookExW(
+            self.WH_MOUSE_LL, self._proc, None, 0)
+        msg = wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
+            pass
+        user32.UnhookWindowsHookEx(self._hook)
+        self._hook = None
+
+    def _callback(self, ncode, wparam, lparam):
+        self.last_event_ts = time.time()
+        # Phase 2: XBUTTON down/up → voice_ptt 事件
         return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
 
 
@@ -721,6 +783,15 @@ class GlobalIme:
             mode += " · 单字"
         if self.last_fg_app and self.last_fg_app in self.state.get("passthrough", ()):
             mode += f" · {self.last_fg_app} 直通"
+        vs = self.state.get("voice_state")
+        if vs in ("recording", "transcribing", "polishing"):
+            label = {"recording": "🎤 录音中", "transcribing": "识别中",
+                     "polishing": "润色中"}[vs]
+            el = time.monotonic() - self.state.get("voice_info", {}).get("ts",
+                                                                        time.monotonic())
+            mode += f" · {label} {el:.0f}s"
+        elif vs == "error":
+            mode += f" · ⚠ {self.state.get('voice_info', {}).get('message', '语音错误')}"
         page = (f"  {self.controller.page + 1}/{self.controller.page_count}"
                 if buf and self.controller.page_count > 1 else "")
         status = tk.Label(self.rows, font=f_status, fg=self.C_GRAY, bg=self.C_BG)

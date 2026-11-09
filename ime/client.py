@@ -85,6 +85,18 @@ class WinClient(GlobalIme):
                          fuzzy=self.settings.get("fuzzy", True),
                          error_log_path=app_data_dir() / "hook_errors.log")
         self.state["passthrough"] = set(self.settings.get("passthrough", []))
+        # 语音输入(v2.1): FunASR 本地转写 + GLM 润色; PTT 默认右 Ctrl
+        from .voice.config import VoiceConfig
+        from .voice.voice_ime import VoiceIme
+        self.vcfg = VoiceConfig()
+        self.voice = VoiceIme(self.vcfg,
+                              on_state=self._voice_state,
+                              on_output=self._voice_output)
+        self.state["voice_ptt"] = self.vcfg.ptt_vk
+        self.state["voice_enabled"] = self.vcfg.enabled
+        self.voice_win = None
+        if self.vcfg.enabled:
+            self.voice.preload()
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
@@ -112,6 +124,10 @@ class WinClient(GlobalIme):
                              radio=True, checked=lambda item: self.model_name == "25M"),
             pystray.MenuItem("模糊音", self._menu_fuzzy,
                              checked=lambda item: self.controller.engine.fuzzy),
+            pystray.MenuItem("语音输入 (按住右Ctrl)",
+                             self._menu_voice,
+                             checked=lambda item: self.vcfg.enabled),
+            pystray.MenuItem("语音设置…", self._menu_voice_settings),
             pystray.MenuItem(
                 lambda item: ("直通: " + (self.last_fg_app or "切到目标应用后点这里")),
                 self._menu_passthrough,
@@ -139,6 +155,70 @@ class WinClient(GlobalIme):
 
     def _menu_fuzzy(self, icon, item):
         self.events.put(("fuzzy", None, ""))
+
+    def _menu_voice(self, icon, item):
+        self.events.put(("voice", None, ""))
+
+    def _menu_voice_settings(self, icon, item):
+        self.events.put(("voice_settings", None, ""))
+
+    # ---- 语音(主线程) ----
+
+    def _voice_state(self, state, info):
+        # 工作线程回调 → 只写共享字段, 渲染交给 _tick(主循环零阻塞红线)
+        self.state["voice_state"] = state
+        self.state["voice_info"] = {**info, "ts": time.monotonic()}
+
+    def _voice_output(self, text, raw):
+        # 工作线程回调: 注入走 SendInput, 线程安全; 不碰 Tk
+        try:
+            send_text(text)
+        except Exception as exc:
+            self.state["voice_state"] = "error"
+            self.state["voice_info"] = {"message": f"上屏失败: {exc}"}
+
+    def _apply_voice_toggle(self):
+        self.vcfg.enabled = not self.vcfg.enabled
+        self.voice.enabled = self.vcfg.enabled
+        self.state["voice_enabled"] = self.vcfg.enabled
+        if self.vcfg.enabled:
+            self.voice.preload()
+        else:
+            self.voice.cancel()
+        self._toast_until = time.time() + 0.9
+
+    def _show_voice_settings(self):
+        import tkinter as tk
+        if self.voice_win is not None:
+            self.voice_win.destroy()
+        win = self.voice_win = tk_toplevel(self.root)
+        win.title("鸢尾输入法 · 语音设置")
+        win.geometry("520x260")
+        llm = self.vcfg.llm
+        rows = [
+            ("润色模型 base_url", "base_url", llm.get("base_url", "")),
+            ("API Key", "api_key", llm.get("api_key", "")),
+            ("模型", "model", llm.get("model", "")),
+        ]
+        entries = {}
+        for label, key, val in rows:
+            tk_label(win, label, row=0)
+            e = tk.Entry(win, show="*" if key == "api_key" else "")
+            e.insert(0, val)
+            e.pack(fill="x", padx=12, pady=2)
+            entries[key] = e
+        status = tk.Label(win, text="", fg="#8b7cf0", bg="#20242c")
+        status.pack(fill="x", padx=12, pady=4)
+
+        def save():
+            for key, e in entries.items():
+                self.vcfg.llm[key] = e.get().strip()
+            self.vcfg.save()
+            ready = self.vcfg.llm_ready()
+            status.configure(text="已保存 ✓ " + ("润色已就绪" if ready
+                              else "Key 为空: 润色关闭, 松手直出转写稿"))
+        tk.Button(win, text="保存", command=save,
+                  bg="#8b7cf0", fg="#191236", relief="flat").pack(pady=6)
 
     def _menu_passthrough(self, icon, item):
         """把最近前台应用加入/移出直通白名单(远程桌面等转发键盘的应用)。"""
@@ -232,6 +312,14 @@ class WinClient(GlobalIme):
                             self.controller.output = ""
                             send_text(delta)
                         self.state["buffer"] = self.controller.buffer
+                elif kind == "voice":
+                    self._apply_voice_toggle()
+                elif kind == "voice_settings":
+                    self._show_voice_settings()
+                elif kind == "voice_ptt_down":
+                    self.voice.ptt_down()
+                elif kind == "voice_ptt_up":
+                    self.voice.ptt_up()
                 elif kind == "fuzzy":
                     self.controller.engine.fuzzy = not self.controller.engine.fuzzy
                     self.settings["fuzzy"] = self.controller.engine.fuzzy
