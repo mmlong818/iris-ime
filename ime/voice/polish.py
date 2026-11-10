@@ -2,7 +2,9 @@
 
 需求 R1: 口头禅(呃/那个/然后)剔除, 标点分段编号加好,
 改口("用 Postgres,不对,用 SQLite")只留终版。
-需求 R6(Phase 2): 直译模式说中出英。
+需求 R2: 应用感知——同一段口述, 按前台应用整理成不同风格。
+需求 R3: 热词——专有名词规范写法随 prompt 下发, 由模型校对同音误识别。
+需求 R6: 直译模式说中出英。
 
 设计: OpenAI 兼容 /chat/completions; 超时/出错抛异常 → 调用方回退原文。
 temperature 低(0.2): 整理不是创作, 忠实优先。
@@ -18,22 +20,57 @@ BASE_RULES = """你是听写整理器。把用户口述的转写稿整理成可�
 6. 只输出整理后的正文, 不要解释、不要前后缀、不要 markdown 代码块
 7. 整理不等于扩写: 不得添加口述中没有的信息"""
 
+_CODING = "\n8. 场景是 AI 编程助手的指令: 多个诉求整理成带编号的需求清单, 每条一句话说清要什么"
+
 PROFILE_RULES = {
     "default": "",
-    "coding": "\n8. 场景是 AI 编程助手的指令: 多个诉求整理成带编号的需求清单, 每条一句话说清要什么",
+    "coding": _CODING,
+    "terminal": _CODING,
     "email": "\n8. 场景是邮件正文: 开头补称呼('您好'/收件人名可从口述推断, 没有则用'您好'), 结尾补落款('祝好'类), 语气正式",
     "chat": "\n8. 场景是即时聊天(微信): 保留口语和语气, 只去口头禅和错字, 不要正式化, 尽量短",
 }
 
+# 成稿里的换行怎么上屏(见 global_ime.send_text_lines): 聊天框和 AI 对话框
+# 里回车=发送, 终端里回车=提交, 直接打回车会把一段话拆成几条发出去
+PROFILE_NEWLINE = {
+    "default": "enter",
+    "email": "enter",
+    "coding": "shift_enter",
+    "chat": "shift_enter",
+    "terminal": "flat",
+}
 
-def build_prompt(text, profile="default"):
-    rules = BASE_RULES + PROFILE_RULES.get(profile, "")
+MAX_HOTWORDS = 200   # prompt 里最多带这么多热词, 再多挤占正文注意力
+
+
+def _hotword_rule(hotwords):
+    words = [w.strip() for w in (hotwords or []) if w and w.strip()]
+    if not words:
+        return ""
+    return ("\n\n专有名词表(转写稿里读音相同或相近的词, 多半是这些词被听错了,"
+            "按此表写法改正; 表里的词口述中没出现就不要硬加):\n"
+            + "、".join(words[:MAX_HOTWORDS]))
+
+
+def build_prompt(text, profile="default", hotwords=None):
+    rules = BASE_RULES + PROFILE_RULES.get(profile, "") + _hotword_rule(hotwords)
     return {"role": "user", "content": f"{rules}\n\n口述转写稿:\n{text}"}
 
 
-def build_translate_prompt(text):
-    return {"role": "user", "content":
-            f"把下面的中文口述准确翻译成自然的英文, 只输出译文:\n{text}"}
+def build_translate_prompt(text, hotwords=None):
+    rules = ("把下面的中文口述翻译成自然、地道的英文。口述里的口头禅和填充词不译,"
+             "改口与自我纠正只按最终说法翻译; 只输出英文译文, 不要解释、"
+             "不要引号、不要保留中文原文。" + _hotword_rule(hotwords))
+    return {"role": "user", "content": f"{rules}\n\n口述转写稿:\n{text}"}
+
+
+def apply_corrections(text, corrections):
+    """纠错表确定性替换(长词优先, 避免短词先把长词拆坏)。"""
+    for wrong in sorted((corrections or {}), key=len, reverse=True):
+        right = corrections[wrong]
+        if wrong and isinstance(right, str):
+            text = text.replace(wrong, right)
+    return text
 
 
 class Polisher:
@@ -58,8 +95,8 @@ class Polisher:
         data = resp.json()
         return data["choices"][0]["message"]["content"].strip()
 
-    def polish(self, text, profile="default"):
-        return self._chat([build_prompt(text, profile)])
+    def polish(self, text, profile="default", hotwords=None):
+        return self._chat([build_prompt(text, profile, hotwords)])
 
-    def translate(self, text):
-        return self._chat([build_translate_prompt(text)])
+    def translate(self, text, hotwords=None):
+        return self._chat([build_translate_prompt(text, hotwords)])

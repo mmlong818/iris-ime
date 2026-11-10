@@ -23,7 +23,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from .global_ime import GlobalIme, send_text
+from .global_ime import (GlobalIme, MouseHook, foreground_exe, send_text,
+                         send_text_lines)
 from .reranker import SentenceModel, Reranker
 from . import __version__
 from .tsf_server import start_background as tsf_start_background, EngineService
@@ -90,6 +91,7 @@ class WinClient(GlobalIme):
         # 菜单置灰, 其余功能不受影响
         self.vcfg = None
         self.voice = None
+        self.mouse_hook = None
         try:
             from .voice.config import VoiceConfig
             from .voice.voice_ime import VoiceIme
@@ -97,9 +99,9 @@ class WinClient(GlobalIme):
             self.voice = VoiceIme(self.vcfg,
                                   on_state=self._voice_state,
                                   on_output=self._voice_output)
-            self.state["voice_ptt"] = self.vcfg.ptt_vk
-            self.state["voice_enabled"] = self.vcfg.enabled
             self.voice_win = None
+            self.mouse_hook = MouseHook(self.events, self.state)
+            self._sync_voice_state()
             if self.vcfg.enabled:
                 self.voice.preload()
         except Exception as exc:
@@ -204,15 +206,31 @@ class WinClient(GlobalIme):
 
     # ---- 语音(主线程) ----
 
+    def _sync_voice_state(self):
+        """把语音配置同步给钩子线程读的共享状态, 并按需启停鼠标钩子。"""
+        self.state["voice_ptt"] = self.vcfg.ptt_vk
+        self.state["voice_translate_vk"] = self.vcfg.translate_vk
+        self.state["voice_mouse"] = self.vcfg.ptt_mouse
+        self.state["voice_enabled"] = self.vcfg.enabled
+        # LL 鼠标钩子会收到每次鼠标移动: 只有开了语音且配了侧键才装
+        if self.mouse_hook is not None:
+            if self.vcfg.enabled and self.vcfg.ptt_mouse:
+                self.mouse_hook.start()
+            else:
+                self.mouse_hook.stop()
+
     def _voice_state(self, state, info):
         # 工作线程回调 → 只写共享字段, 渲染交给 _tick(主循环零阻塞红线)
+        if "mode" in info:
+            self.state["voice_mode"] = info["mode"]
         self.state["voice_state"] = state
         self.state["voice_info"] = {**info, "ts": time.monotonic()}
 
     def _voice_output(self, text, raw):
-        # 工作线程回调: 注入走 SendInput, 线程安全; 不碰 Tk
+        # 工作线程回调: 注入走 SendInput, 线程安全; 不碰 Tk。
+        # 换行按目标应用的风格上屏(聊天/AI 对话框里回车=发送)
         try:
-            send_text(text)
+            send_text_lines(text, self.voice.last_meta.get("newline", "enter"))
         except Exception as exc:
             self.state["voice_state"] = "error"
             self.state["voice_info"] = {"message": f"上屏失败: {exc}"}
@@ -220,11 +238,12 @@ class WinClient(GlobalIme):
     def _apply_voice_toggle(self):
         self.vcfg.enabled = not self.vcfg.enabled
         self.voice.enabled = self.vcfg.enabled
-        self.state["voice_enabled"] = self.vcfg.enabled
+        self._sync_voice_state()
         if self.vcfg.enabled:
             self.voice.preload()
         else:
             self.voice.cancel()
+            self.state["ptt_held"] = False
         self._toast_until = time.time() + 0.9
 
     def _show_voice_settings(self):
@@ -244,20 +263,15 @@ class WinClient(GlobalIme):
 
     def _show_voice_settings_inner(self):
         import tkinter as tk
-        import ctypes
         if self.voice_win is not None:
             self.voice_win.destroy()
         win = self.voice_win = tk_toplevel(self.root)
         win.title("鸢尾输入法 · 语音设置")
-        win.geometry("520x260")
+        W, H = 560, 470
         # 多屏: 固定弹在主屏中央(跟鼠标会落到副屏, 用户实测不适)
-        try:
-            import ctypes
-            w = win.winfo_screenwidth()
-            h = win.winfo_screenheight()
-            win.geometry(f"+{(w - 520) // 2}+{max(40, (h - 260) // 2 - 40)}")
-        except Exception:
-            pass
+        w = win.winfo_screenwidth()
+        h = win.winfo_screenheight()
+        win.geometry(f"{W}x{H}+{(w - W) // 2}+{max(40, (h - H) // 2 - 40)}")
         llm = self.vcfg.llm
         rows = [
             ("润色模型 base_url", "base_url", llm.get("base_url", "")),
@@ -271,13 +285,36 @@ class WinClient(GlobalIme):
             e.insert(0, val)
             e.pack(fill="x", padx=12, pady=2)
             entries[key] = e
+        tk_label(win, "热词(专有名词/人名/产品名, 逗号或空格分隔; 润色时按此写法纠正听错的词)",
+                 row=0)
+        hot = tk.Entry(win)
+        hot.insert(0, "，".join(self.vcfg.hotwords))
+        hot.pack(fill="x", padx=12, pady=2)
+        tk_label(win, "鼠标侧键按住说话", row=0)
+        mouse = tk.IntVar(win, value=self.vcfg.ptt_mouse)
+        mrow = tk.Frame(win, bg="#20242c")
+        mrow.pack(fill="x", padx=12)
+        for text, val in (("关", 0), ("侧键·后退", 1), ("侧键·前进", 2)):
+            tk.Radiobutton(mrow, text=text, value=val, variable=mouse,
+                           fg="#e8eaee", bg="#20242c", selectcolor="#2b323d",
+                           activebackground="#20242c",
+                           activeforeground="#e8eaee").pack(side="left", padx=(0, 14))
+        tk.Label(win, text="按住右 Ctrl 听写 · 按住右 Alt 直译(说中文出英文)\n"
+                           "应用感知与纠错表在 voice.json 的 profiles / corrections 里改",
+                 font=("Microsoft YaHei UI", 9), fg="#8a94a3", bg="#20242c",
+                 justify="left", anchor="w").pack(fill="x", padx=12, pady=(8, 0))
         status = tk.Label(win, text="", fg="#8b7cf0", bg="#20242c")
         status.pack(fill="x", padx=12, pady=4)
 
         def save():
             for key, e in entries.items():
                 self.vcfg.llm[key] = e.get().strip()
+            import re
+            self.vcfg.asr["hotwords"] = [
+                w for w in re.split(r"[,，、;；\s]+", hot.get()) if w]
+            self.vcfg.data["ptt_mouse"] = mouse.get()
             self.vcfg.save()
+            self._sync_voice_state()
             ready = self.vcfg.llm_ready()
             status.configure(text="已保存 ✓ " + ("润色已就绪" if ready
                               else "Key 为空: 润色关闭, 松手直出转写稿"))
@@ -381,7 +418,9 @@ class WinClient(GlobalIme):
                 elif kind == "voice_settings":
                     self._show_voice_settings()
                 elif kind == "voice_ptt_down":
-                    self.voice.ptt_down()
+                    # 前台应用在按下瞬间取: 决定成稿风格与换行方式
+                    self.voice.ptt_down(mode=arg or "dictate",
+                                        exe=foreground_exe())
                 elif kind == "voice_ptt_up":
                     self.voice.ptt_up()
                 elif kind == "fuzzy":
@@ -417,6 +456,8 @@ class WinClient(GlobalIme):
     def _shutdown(self):
         try:
             self.hook.stop()
+            if self.mouse_hook is not None:
+                self.mouse_hook.stop()
         finally:
             if self.icon:
                 self.icon.stop()

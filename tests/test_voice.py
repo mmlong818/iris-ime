@@ -61,7 +61,8 @@ class PromptTest(unittest.TestCase):
 
 class DetectProfileTest(unittest.TestCase):
     def test_known_and_unknown(self):
-        self.assertEqual(detect_profile("claude.exe"), "default")  # Phase 2 才启用
+        self.assertEqual(detect_profile("claude.exe"), "coding")
+        self.assertEqual(detect_profile("unknown.exe"), "default")
         self.assertEqual(detect_profile(None), "default")
 
 
@@ -183,7 +184,7 @@ class VoiceConfigTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "voice.json"
             cfg = VoiceConfig(path=p)
-            self.assertEqual(cfg.ptt_vk, [163, 162])
+            self.assertEqual(cfg.ptt_vk, [163])
             self.assertFalse(cfg.llm_ready())
             cfg.llm["api_key"] = "abc"
             cfg.save()

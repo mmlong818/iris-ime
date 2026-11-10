@@ -126,6 +126,31 @@ def send_text(text):
     user32.SendInput(len(events), events, ctypes.sizeof(INPUT))
 
 
+def send_text_lines(text, newline="enter"):
+    """多行文本上屏。很多输入框里回车=发送(微信/AI 对话框/终端), 语音成稿
+    的分段和编号列表会被拆成好几条发出去, 所以换行方式按场景选:
+    enter=原样回车(编辑器/邮件); shift_enter=Shift+回车软换行(聊天/AI 对话框);
+    flat=拼成一行(终端)。"""
+    lines = text.splitlines() or [""]
+    if newline == "flat":
+        send_text(" ".join(ln.strip() for ln in lines if ln.strip()))
+        return
+    if newline != "shift_enter" or len(lines) == 1:
+        send_text(text)
+        return
+    for n, ln in enumerate(lines):
+        if n:
+            ev = (INPUT * 4)()
+            for k, (vk, flags) in enumerate(((VK_SHIFT, 0), (0x0D, 0),
+                                             (0x0D, KEYEVENTF_KEYUP),
+                                             (VK_SHIFT, KEYEVENTF_KEYUP))):
+                ev[k].type = INPUT_KEYBOARD
+                ev[k].ki = KEYBDINPUT(vk, 0, flags, 0, None)
+            user32.SendInput(4, ev, ctypes.sizeof(INPUT))
+        if ln:
+            send_text(ln)
+
+
 def send_vk(vk):
     """注入一次虚拟按键(自检用)。"""
     events = (INPUT * 2)()
@@ -459,12 +484,21 @@ class KeyboardHook:
         # (远程桌面转发键盘)不劫持。L/R 变体都在配置里。长按自动重复
         # 的 down 用 ptt_held 挡掉。
         ptt = self.state.get("voice_ptt") or []
-        if vk in ptt and self.state.get("voice_enabled") and not self._pt_exe():
-            if is_down and not self.state.get("ptt_held"):
-                self.state["ptt_held"] = True
-                self.events.put(("voice_ptt_down", None, ""))
+        tr = self.state.get("voice_translate_vk") or []
+        if ((vk in ptt or vk in tr) and self.state.get("voice_enabled")
+                and not self._pt_exe()):
+            held = self.state.get("ptt_held")
+            if is_down and not held:
+                # ptt_held 记下是哪个键按下的: 松手只认同一个键(听写键按住
+                # 时碰到直译键不串台)
+                self.state["ptt_held"] = vk
+                self.events.put(("voice_ptt_down",
+                                 "translate" if vk in tr and vk not in ptt
+                                 else None, ""))
                 return 1
-            if not is_down and self.state.get("ptt_held"):
+            if is_down:
+                return 1          # 长按自动重复/另一个语音键: 吞掉
+            if held and (held is True or held == vk):
                 self.state["ptt_held"] = False
                 self.events.put(("voice_ptt_up", None, ""))
                 return 1
@@ -532,41 +566,55 @@ class KeyboardHook:
         return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
 
 
-class MouseHook:
-    """WH_MOUSE_LL 骨架(Phase 2 接线: 鼠标侧键 XBUTTON1/2 作语音 PTT)。
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("pt", wintypes.POINT), ("mouseData", wintypes.DWORD),
+                ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_void_p)]
 
-    与 KeyboardHook 同款结构: 后台线程消息泵 + 看门狗心跳 + 回调异常放行。
-    Phase 1 不启动, 只保证结构就位。"""
+
+class MouseHook:
+    """WH_MOUSE_LL: 鼠标侧键(XBUTTON1 后退 / XBUTTON2 前进)作语音 PTT。
+
+    只在用户配置了侧键时才安装: LL 鼠标钩子会收到每一次鼠标移动,
+    Python 回调再快也要抢 GIL——不用侧键的人不该为此付延迟。回调首行
+    就按消息类型分流, 非侧键事件直接放行。"""
 
     WH_MOUSE_LL = 14
     WM_XBUTTONDOWN = 0x020B
     WM_XBUTTONUP = 0x020C
+    LLMHF_INJECTED = 0x01
 
     def __init__(self, events, state, error_log_path=None):
         self.events = events
         self.state = state
         self.error_log_path = error_log_path
-        self.last_event_ts = time.time()
         self._hook = None
-        self._proc = None
+        self._proc = HOOKPROC(self._callback)
         self._thread = None
+        self._ready = threading.Event()
+
+    @property
+    def running(self):
+        return bool(self._thread and self._thread.is_alive())
 
     def start(self):
-        import ctypes
-        self._proc = ctypes.WINFUNCTYPE(
-            ctypes.c_long, ctypes.c_int, ctypes.c_uint,
-            ctypes.POINTER(ctypes.c_void_p))(self._callback)
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        if self.running:
+            return
+        self._ready = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="iris-mouse-hook")
         self._thread.start()
+        self._ready.wait(3)
 
     def stop(self):
-        if self._hook and self._thread and self._thread.ident:
+        if self._thread and self._thread.ident and self.running:
             user32.PostThreadMessageW(self._thread.ident, 0x0012, 0, 0)  # WM_QUIT
 
     def _run(self):
-        import ctypes
-        self._hook = user32.SetWindowsHookExW(
-            self.WH_MOUSE_LL, self._proc, None, 0)
+        self._hook = user32.SetWindowsHookExW(self.WH_MOUSE_LL, self._proc, None, 0)
+        self._ready.set()
+        if not self._hook:
+            return
         msg = wintypes.MSG()
         while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
             pass
@@ -574,9 +622,37 @@ class MouseHook:
         self._hook = None
 
     def _callback(self, ncode, wparam, lparam):
-        self.last_event_ts = time.time()
-        # Phase 2: XBUTTON down/up → voice_ptt 事件
+        if ncode != 0 or wparam not in (self.WM_XBUTTONDOWN, self.WM_XBUTTONUP):
+            return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+        try:
+            if self._handle(wparam, lparam):
+                return 1
+        except Exception:
+            pass   # 钩子里绝不能抛: 保守放行
         return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+
+    def _handle(self, wparam, lparam):
+        """侧键事件 → voice_ptt 事件; 返回 True 表示吞掉(不触发浏览器后退)。"""
+        want = self.state.get("voice_mouse") or 0
+        if not want or not self.state.get("voice_enabled"):
+            return False
+        ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+        if ms.flags & self.LLMHF_INJECTED or (ms.mouseData >> 16) != want:
+            return False
+        held = self.state.get("ptt_held")
+        if wparam == self.WM_XBUTTONDOWN:
+            pt = self.state.get("passthrough")
+            if pt and foreground_exe() in pt:
+                return False              # 直通应用(远程桌面)不劫持
+            if not held:
+                self.state["ptt_held"] = "mouse"
+                self.events.put(("voice_ptt_down", None, ""))
+            return True
+        if held == "mouse":
+            self.state["ptt_held"] = False
+            self.events.put(("voice_ptt_up", None, ""))
+            return True
+        return False
 
 
 class GlobalIme:
@@ -634,6 +710,7 @@ class GlobalIme:
         self._idle_pos = None
         self._drag = None
         self._dragging = False
+        self._render_sig = None   # 上一拍渲染内容签名(没变不重建控件)
         if ui_settings_path and Path(ui_settings_path).exists():
             try:
                 pos = json.loads(Path(ui_settings_path).read_text(encoding="utf-8")).get("idle_pos")
@@ -713,6 +790,10 @@ class GlobalIme:
         self.controller.settle_rerank()
         self.controller.poll_rerank()  # 后台重排算完且缓冲未变 → 换头
         self._render()
+        # 重排定必须只在 _tick 末尾、且每条链恰好一次。alpha.16 曾把这行
+        # 误挪进 _track_foreground: 客户端每 1.5 秒多出一条永续 tick 链,
+        # 主线程被重绘占满——设置窗/状态条拖不动的根因
+        self.root.after(20, self._tick)
 
     def _track_foreground(self):
         """每 1.5s 记一次前台应用进程名(托盘"直通"菜单显示用)。"""
@@ -726,7 +807,6 @@ class GlobalIme:
                 self.last_fg_app = exe
                 self.state["last_fg_app"] = exe
                 self.on_fg_app_changed()
-        self.root.after(20, self._tick)
 
     def _click_select(self, abs_idx):
         """鼠标点选候选(窗口 NOACTIVATE, 焦点仍在目标应用)。"""
@@ -747,6 +827,8 @@ class GlobalIme:
     def _drag_motion(self, event):
         if self._drag is None:
             return
+        if self._drag_stale():      # 松手事件丢了
+            return
         self._dragging = True
         nx = event.x_root - self._drag[0]
         ny = event.y_root - self._drag[1]
@@ -765,14 +847,34 @@ class GlobalIme:
             except OSError:
                 pass
 
+    def _drag_stale(self):
+        """拖拽标记还在但鼠标键已松开(松手事件丢失): 收尾, 防止永久冻结渲染。
+        左右键互换的系统上主键是 0x02, 两个都看。"""
+        if self._drag is None:
+            return False
+        if (user32.GetAsyncKeyState(0x01) & 0x8000
+                or user32.GetAsyncKeyState(0x02) & 0x8000):
+            return False
+        self._drag_end(None)
+        return True
+
     def _render(self):
         import tkinter.font as tkfont
+        # 拖拽中不重绘: 重绘会销毁鼠标下的状态行控件, Tk 的隐式抓取随之
+        # 丢失, 后续 B1-Motion 收不到——"状态条经常拖不动"的直接原因
+        if self._drag is not None and not self._drag_stale():
+            return
         enabled = self.state["enabled"]
         buf = self.controller.buffer
         page_cands = self.controller.page_candidates
 
         # 切换提示: 大字 中/英 独占卡片 0.9 秒(误触 Shift 一眼可见)
         if time.time() < self._toast_until:
+            sig = ("toast", enabled)
+            if sig == self._render_sig:
+                self._place()
+                return
+            self._render_sig = sig
             self._win_w, self._win_h = 96, 96
             self.canvas.delete("all")
             self._round_rect(1, 1, self._win_w - 2, self._win_h - 2, 18,
@@ -791,9 +893,6 @@ class GlobalIme:
         f_cand = tkfont.Font(family="Microsoft YaHei UI", size=15)
         f_badge = tkfont.Font(family="Microsoft YaHei UI", size=9)
 
-        for child in self.rows.winfo_children():
-            child.destroy()
-
         # 状态行: 绿点(中)/灰点(英) + 模式 + 页码
         dot = self.C_ACCENT if enabled else self.C_GRAY
         mode = "中" if enabled else "英"
@@ -807,6 +906,9 @@ class GlobalIme:
         if vs in ("recording", "transcribing", "polishing"):
             label = {"recording": "🎤 录音中", "transcribing": "识别中",
                      "polishing": "润色中"}[vs]
+            if self.state.get("voice_mode") == "translate":
+                label = {"recording": "🎤 直译录音中", "transcribing": "识别中",
+                         "polishing": "翻译中"}[vs]
             el = time.monotonic() - self.state.get("voice_info", {}).get("ts",
                                                                         time.monotonic())
             mode += f" · {label} {el:.0f}s"
@@ -814,9 +916,19 @@ class GlobalIme:
             mode += f" · ⚠ {self.state.get('voice_info', {}).get('message', '语音错误')}"
         page = (f"  {self.controller.page + 1}/{self.controller.page_count}"
                 if buf and self.controller.page_count > 1 else "")
-        status = tk.Label(self.rows, font=f_status, fg=self.C_GRAY, bg=self.C_BG)
         status_text = f"{mode} · 空格上屏 · PgUp/Dn 翻页{page}" if buf \
             else f"{mode} · Ctrl+Alt+P 开启"
+        # 内容没变就不重建控件(此前每 20ms 全量销毁重建, 空转也吃 CPU,
+        # 且悬停高亮被不停抹掉); 位置仍每拍更新以跟随光标
+        sig = (enabled, buf, status_text,
+               tuple((i, c.text, c.preview, c.pinyin) for i, c in page_cands))
+        if sig == self._render_sig:
+            self._place()
+            return
+        self._render_sig = sig
+        for child in self.rows.winfo_children():
+            child.destroy()
+        status = tk.Label(self.rows, font=f_status, fg=self.C_GRAY, bg=self.C_BG)
         status.configure(text=status_text, anchor="w")
         status.pack(fill="x", pady=(0, 2))
 

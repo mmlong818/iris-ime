@@ -16,17 +16,15 @@ from pathlib import Path
 from .asr_local import LocalASR
 from .capture import Recorder
 from .config import voice_data_dir
-from .polish import Polisher
-
-# 应用感知 profile(R2, Phase 2 完善): 前台 exe → 整理风格
-PROFILE_BY_EXE = {
-    # "claude.exe": "coding", "cursor.exe": "coding",
-    # "outlook.exe": "email", "wechat.exe": "chat", "weixin.exe": "chat",
-}
+from .polish import PROFILE_NEWLINE, Polisher, apply_corrections
 
 
-def detect_profile(exe):
-    return PROFILE_BY_EXE.get((exe or "").lower(), "default")
+def detect_profile(exe, cfg=None):
+    """前台 exe → 整理风格(应用感知, R2)。映射在 voice.json 的 profiles。"""
+    if cfg is None:
+        from .config import PROFILES_DEFAULT
+        return PROFILES_DEFAULT.get((exe or "").lower(), "default")
+    return cfg.profile_for(exe)
 
 
 class VoiceIme:
@@ -46,16 +44,23 @@ class VoiceIme:
         self.state_ts = time.monotonic()
         self.last_raw = ""
         self._busy = False         # 工作线程在跑(转写+润色)
+        self._mode = "dictate"     # 本次口述: dictate 听写 / translate 直译
+        self._exe = None           # 按下 PTT 时的前台应用(决定整理风格)
+        # 最近一次成稿的元信息, on_output 回调时可读(换行上屏策略用)
+        self.last_meta = {"mode": "dictate", "profile": "default",
+                          "newline": "enter", "exe": None}
         self.on_state = on_state   # fn(state: str, info: dict)
         self.on_output = on_output  # fn(text: str, raw: str)
 
     # ---- 主线程入口(钩子事件) ----
 
-    def ptt_down(self):
-        if not self.enabled or self._busy:
+    def ptt_down(self, mode="dictate", exe=None):
+        if not self.enabled or self._busy or self.state == "recording":
             return
+        self._mode = "translate" if mode == "translate" else "dictate"
+        self._exe = exe
         self.recorder.start()
-        self._set("recording")
+        self._set("recording", {"mode": self._mode})
 
     def ptt_up(self):
         if self.state != "recording":
@@ -66,8 +71,8 @@ class VoiceIme:
             return
         self._busy = True
         self._set("transcribing", {"wav": str(wav)})
-        threading.Thread(target=self._run, args=(wav,), daemon=True,
-                         name="iris-voice").start()
+        threading.Thread(target=self._run, args=(wav, self._mode, self._exe),
+                         daemon=True, name="iris-voice").start()
 
     def preload(self):
         """开启语音时预热 ASR 模型(首次拉取 ~1GB, 之后离线毫秒级)。"""
@@ -81,7 +86,7 @@ class VoiceIme:
 
     # ---- 工作线程 ----
 
-    def _run(self, wav):
+    def _run(self, wav, mode="dictate", exe=None):
         raw = ""
         try:
             raw = self.asr.transcribe(wav)
@@ -93,20 +98,40 @@ class VoiceIme:
             self._busy = False
             self._set("idle")
             return
+        # 纠错表: 本地确定性替换, 断网/没配 Key 也生效
+        raw = apply_corrections(raw, self.cfg.data.get("corrections"))
         self.last_raw = raw
-        self._set("polishing", {"raw": raw})
-        text = raw
+        profile = detect_profile(exe, self.cfg)
+        hotwords = self.cfg.hotwords
+        self._set("polishing", {"raw": raw, "mode": mode})
+        text, note = raw, ""
         if self.cfg.llm_ready():
             try:
-                profile = detect_profile(None)  # Phase 2: 前台 exe 感知
-                text = self.polisher.polish(raw, profile=profile)
+                if mode == "translate":
+                    text = self.polisher.translate(raw, hotwords=hotwords)
+                else:
+                    text = self.polisher.polish(raw, profile=profile,
+                                                hotwords=hotwords)
             except Exception:
                 text = raw        # 兜底: 润色失败出原文, 绝不空手
-        self._append_history(wav, raw, text)
+                if mode == "translate":
+                    note = "直译失败, 已出中文原文"
+        elif mode == "translate":
+            note = "直译需要先配 API Key, 已出中文原文"
+        if not text:
+            text = raw
+        self.last_meta = {
+            "mode": mode, "profile": profile, "exe": exe,
+            # 译文按目标应用换行; 风格规则只用于听写
+            "newline": PROFILE_NEWLINE.get(profile, "enter")}
+        self._append_history(wav, raw, text, mode, profile, exe)
         self._busy = False
-        self._set("idle")
         if self.on_output:
             self.on_output(text, raw)
+        if note:
+            self._set("error", {"message": note})
+        else:
+            self._set("idle")
 
     # ---- 内部 ----
 
@@ -116,11 +141,13 @@ class VoiceIme:
         if self.on_state:
             self.on_state(state, info or {})
 
-    def _append_history(self, wav, raw, text):
+    def _append_history(self, wav, raw, text, mode="dictate",
+                        profile="default", exe=None):
         try:
             self.history_dir.mkdir(parents=True, exist_ok=True)
             rec = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                   "wav": str(wav), "raw": raw, "text": text}
+                   "wav": str(wav), "raw": raw, "text": text,
+                   "mode": mode, "profile": profile, "exe": exe}
             with open(self.history_dir / f"{datetime.now():%Y%m}.jsonl", "a",
                       encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
