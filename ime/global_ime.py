@@ -136,6 +136,19 @@ def send_vk(vk):
     user32.SendInput(2, events, ctypes.sizeof(INPUT))
 
 
+def foreground_pid():
+    """前台窗口所属进程 PID; 失败返回 None。
+
+    输入法自己的窗口(设置/统计等 Tk 窗体)需要按键直通——否则字母
+    被钩子吞掉、粘贴无效(用户实测"设置贴不进去")。"""
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    pid = wintypes.DWORD()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return pid.value or None
+
+
 def foreground_exe():
     """前台窗口所属进程的 exe 名(小写), 如 "uuremote.exe"; 失败返回 None。
 
@@ -433,6 +446,14 @@ class KeyboardHook:
 
         if is_down and vk not in SHIFT_VKS:
             self.state["shift_armed"] = False  # Shift 后跟了别的键, 不再算单击
+
+        # 自家窗口直通: 设置/统计窗里要正常打字和粘贴, IME 不得拦截
+        if foreground_pid() == os.getpid():
+            if self.state.get("buffer") and not self.state.get("pt_cleared"):
+                self.state["pt_cleared"] = True
+                self.events.put(("passthrough", None, ""))
+            return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
+        self.state["pt_cleared"] = False
 
         # 语音 PTT(按住说话): 放在文字开关与 is_down 门之前——
         # 语音有独立开关; 松手是 up 事件, 必须能到达这里。直通应用
