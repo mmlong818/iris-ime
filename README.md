@@ -193,6 +193,15 @@ pyinstaller --noconfirm --name IrisIME --windowed --onedir --paths . \
 
 打包态用户词与崩溃日志写到 `%APPDATA%\pinyin-ime\`(开发态在项目 `data/`)。
 
+**语音模型说明**: 安装包内置量化 SenseVoice(`models/sensevoice-onnx/model_quant.onnx`,
+241MB, 超 GitHub 单文件限制不入库)——打包前本机导出一次:
+
+```bash
+python -c "from funasr import AutoModel; print(AutoModel(model='iic/SenseVoiceSmall', disable_update=True).export(type='onnx', quantize=True))"
+# 把导出目录里的 model_quant.onnx / config.yaml / am.mvn / *.bpe.model / tokens.json
+# 复制到 models/sensevoice-onnx/
+```
+
 ## 中英文混排空格(ime/textstyle.py, 默认关闭)
 
 "盘古之白"能力已实现但**默认关闭**——社区对"该不该加"没有共识。规则:
