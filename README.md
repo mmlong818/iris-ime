@@ -36,7 +36,7 @@ k-best 路径候选 + 神经重排序, 外加一个**全局键盘钩子客户端
 
 ```bash
 # 1. 安装依赖
-pip install numpy scipy comtypes
+pip install numpy scipy comtypes pypinyin
 
 # 2. 编译词库缓存(约 20 秒, 产出 dicts/cache.pkl)
 python build_cache.py

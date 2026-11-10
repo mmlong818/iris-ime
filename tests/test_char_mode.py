@@ -7,6 +7,7 @@
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from ime import Engine
@@ -76,7 +77,9 @@ class CharModeTest(unittest.TestCase):
         self.assertEqual(len(c0.text), 1)
         self.assertEqual(c0.commit_end, 4)
 
-    def test_compose_learn_after_char_flow(self):
+    # 冻结时钟: 合成词窗口(3 秒)不能依赖机器快慢, 否则慢机/高负载下偶发失败
+    @mock.patch("time.monotonic", return_value=1000.0)
+    def test_compose_learn_after_char_flow(self, _clock):
         # 单字模式选 硬+编 后, 3 秒合成词学习应记住 硬编
         self._type("yingbian")
         self._ctrl_backspace()

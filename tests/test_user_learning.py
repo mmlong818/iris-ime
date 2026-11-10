@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from ime import Engine
@@ -69,7 +70,9 @@ class PhraseCompositionTest(unittest.TestCase):
         for ch in text:
             self.ctl.feed_key(ch, ch)
 
-    def test_out_of_dict_word_compose_and_learn(self):
+    # 冻结时钟: 合成词窗口(3 秒)不能依赖机器快慢, 否则慢机/高负载下偶发失败
+    @mock.patch("time.monotonic", return_value=1000.0)
+    def test_out_of_dict_word_compose_and_learn(self, _clock):
         # 逐字上屏"硬"+"编" => 合成词学习记住"硬编", 第二遍一遍直达
         self.type("ying")
         hard = next(i for i, c in enumerate(self.ctl.result.candidates)
