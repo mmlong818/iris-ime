@@ -173,7 +173,18 @@ class WinClient(GlobalIme):
 
     def _menu_voice_settings(self, icon, item):
         if self.voice:
-            self.events.put(("voice_settings", None, ""))
+            try:
+                self.events.put(("voice_settings", None, ""))
+            except Exception:
+                pass
+        else:
+            try:
+                with open(app_data_dir() / "hook_errors.log", "a",
+                          encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") +
+                            "[voice-settings] voice 子系统未加载\n")
+            except OSError:
+                pass
 
     # ---- 语音(主线程) ----
 
@@ -201,6 +212,21 @@ class WinClient(GlobalIme):
         self._toast_until = time.time() + 0.9
 
     def _show_voice_settings(self):
+        import tkinter as tk
+        try:
+            self._show_voice_settings_inner()
+        except Exception:
+            # 窗口程序异常不可见, 落盘诊断
+            import traceback
+            try:
+                with open(app_data_dir() / "hook_errors.log", "a",
+                          encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") +
+                            "[voice-settings] " + traceback.format_exc() + "\n")
+            except OSError:
+                pass
+
+    def _show_voice_settings_inner(self):
         import tkinter as tk
         if self.voice_win is not None:
             self.voice_win.destroy()
