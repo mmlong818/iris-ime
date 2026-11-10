@@ -250,14 +250,12 @@ class WinClient(GlobalIme):
         win = self.voice_win = tk_toplevel(self.root)
         win.title("鸢尾输入法 · 语音设置")
         win.geometry("520x260")
-        # 多屏: 弹在鼠标所在屏幕中央(默认级联位置可能落到副屏/屏外)
+        # 多屏: 固定弹在主屏中央(跟鼠标会落到副屏, 用户实测不适)
         try:
-            pt = ctypes.wintypes.POINT()
-            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-            win.update_idletasks()
-            x = max(0, pt.x - 260)
-            y = max(0, pt.y - 130)
-            win.geometry(f"+{x}+{y}")
+            import ctypes
+            w = win.winfo_screenwidth()
+            h = win.winfo_screenheight()
+            win.geometry(f"+{(w - 520) // 2}+{max(40, (h - 260) // 2 - 40)}")
         except Exception:
             pass
         llm = self.vcfg.llm
