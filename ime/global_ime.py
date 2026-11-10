@@ -453,7 +453,6 @@ class KeyboardHook:
                 self.state["pt_cleared"] = True
                 self.events.put(("passthrough", None, ""))
             return user32.CallNextHookEx(self._hook, ncode, wparam, lparam)
-        self.state["pt_cleared"] = False
 
         # 语音 PTT(按住说话): 放在文字开关与 is_down 门之前——
         # 语音有独立开关; 松手是 up 事件, 必须能到达这里。直通应用
