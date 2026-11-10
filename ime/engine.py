@@ -7,6 +7,7 @@
   3. 候选 = 首段不同的各条路径, 按 (首段边分 + 首段之后最优分) 排序。
 """
 
+import heapq
 import math
 import pickle
 import time
@@ -29,6 +30,43 @@ PAGE_SIZE = 9
 RERANK_TOP = 8          # 分数序直入重排考虑集的条数
 RERANK_MAX = 24         # 考虑集上限: 评分成本 ~O(条数×字数), 长句全量(200 条)
                         # 25M 模型曾达 94s, 是客户端卡死的根源
+
+# ---- 按键容错(借鉴 WowType): 四种纠错边 ----
+# 相邻键按错/两键按反/多按一字母/漏按一字母, 只在音节级(span 不含隔音处理)。
+# 纠错边仅在该跨度本身不是合法音节时生成(正确输入零影响、性能可控),
+# 每条纠错边付 typo_penalty; 路径含纠错时若存在零纠错全解析则整体排后。
+QWERTY_NEIGHBORS = {
+    "q": "wa", "w": "qeas", "e": "wrsd", "r": "etdf", "t": "ryfg",
+    "y": "tugh", "u": "yihj", "i": "uojk", "o": "ipl", "p": "ol",
+    "a": "qwsz", "s": "aedxz", "d": "serfc", "f": "drtgv", "g": "ftyhb",
+    "h": "gyujn", "j": "huikm", "k": "jiol", "l": "kop",
+    "z": "asx", "x": "zasdc", "c": "xsfv", "v": "cfgb", "b": "vghn",
+    "n": "bhjm", "m": "njk",
+}
+INITIALS = {"b", "p", "m", "f", "d", "t", "n", "l", "g", "k", "h", "j",
+            "q", "x", "r", "z", "c", "s", "y", "w", "zh", "ch", "sh"}
+# 注意: 元音字母(a/o/e/i/u/v)不在此列——它们本身是音节或不是声母,
+# 混进缩写会拼出"中欧姑娘果"这类垃圾读法
+
+
+def _edge_stream(src, text, end, kind, syls, score):
+    """k-best 归并的单条入边流(立即绑定循环变量, 见 decode 调用处)。"""
+    return ((sc + score, edges + ((text, end, kind, syls),))
+            for sc, edges in src)
+
+
+def _unit_zh(s):
+    """贪婪把 zh/ch/sh 折算成 z/c/s(简拼联合声母键)。"""
+    out = []
+    i = 0
+    while i < len(s):
+        if s[i:i + 2] in ("zh", "ch", "sh"):
+            out.append(s[i])
+            i += 2
+        else:
+            out.append(s[i])
+            i += 1
+    return "".join(out)
 
 
 @dataclass
@@ -101,6 +139,33 @@ class Engine:
         if not self.syl_canon:
             self.fuzzy = False
 
+        # 按键容错与省韵母混简拼(WowType 借鉴): 可关, 罚分可调
+        self.typo = True
+        self.typo_penalty = 8.0
+        self.mixed = True
+        self.mixed_penalty = 2.0       # 每个省略韵母的音节扣 2.0
+        self.mixed_tail_penalty = 4.0  # 输入末字母当缩写声母再扣 4.0
+
+        # 英文混打: code(小写) → 规范写法(github→GitHub); 与词库同目录
+        self.english: dict = {}
+        en_path = cache_path.parent / "english.txt"
+        if en_path.exists():
+            for line in en_path.read_text(encoding="utf-8").splitlines():
+                parts = line.split("\t")
+                if len(parts) == 2 and parts[0]:
+                    self.english[parts[0]] = parts[1]
+
+        # 缩写声母 → 最高频字(省韵母单边占位文本)
+        self.initial_top_char: dict = {}
+        for syl in self.syllables:
+            chars = self.pinyin_chars.get(syl)
+            if not chars:
+                continue
+            ini = syl[:2] if syl[:2] in ("zh", "ch", "sh") else syl[0]
+            cur = self.initial_top_char.get(ini)
+            if cur is None or chars[0][1] > cur[1]:
+                self.initial_top_char[ini] = (chars[0][0], chars[0][1])
+
     def attach_reranker(self, model_path=None):
         """挂载 chinese-ime-lm 的神经重排序模型(可选)。"""
         from .reranker import DEFAULT_MODEL, Reranker, SentenceModel
@@ -136,7 +201,7 @@ class Engine:
 
     def learn(self, text, key, kind=""):
         """上屏学习: 记录 (上屏文本, 当时按键)。简拼、空键不记, 条目封顶。"""
-        if not self.learn_enabled or kind == "initial":
+        if not self.learn_enabled or kind in ("initial", "english"):
             return
         text = text.strip()
         key = "".join(ch for ch in key.lower() if ch.isalpha())
@@ -233,6 +298,90 @@ class Engine:
         memo[span] = keys
         return keys
 
+    def _typo_variants(self, key):
+        """跨度不是合法音节时, 四种单次编辑纠正 → 合法音节(≤3 个)。
+
+        相邻键替换 / 两键按反 / 多按一字母(删一位) / 漏按一字母(插一位)。
+        插入枚举量最大放最后, 命中够数即停。"""
+        m = len(key)
+        out = []
+        for r in range(m):
+            for nb in QWERTY_NEIGHBORS.get(key[r], ""):
+                v = key[:r] + nb + key[r + 1:]
+                if v in self.syl_set and v not in out:
+                    out.append(v)
+        for r in range(m - 1):
+            if key[r] != key[r + 1]:
+                v = key[:r] + key[r + 1] + key[r] + key[r + 2:]
+                if v in self.syl_set and v not in out:
+                    out.append(v)
+        for r in range(m):
+            v = key[:r] + key[r + 1:]
+            if v in self.syl_set and v not in out:
+                out.append(v)
+        if len(out) < 3 and m <= 5:
+            for r in range(m + 1):
+                for ch in "abcdefghijklmnopqrstuvwxyz":
+                    v = key[:r] + ch + key[r:]
+                    if v in self.syl_set and v not in out:
+                        out.append(v)
+                        if len(out) >= 3:
+                            return out
+        return out[:3]
+
+    def _mixed_word_edges(self, key):
+        """省韵母混简拼词级匹配: 每段可打全拼或只打声母。
+
+        key 递归切分成若干段(全拼音节 / 声母缩写), 按各段声母串查
+        initial_words, 再校验全拼段必须等于词的真音节。
+        返回 [(word, weight, nsyl, py, 缩写段数)]。"""
+        results = []
+        seen_w = set()
+
+        def walk(pos, parts, abbrevs):
+            if len(results) >= 12:
+                return
+            if pos == len(key):
+                if not (1 <= len(parts) <= 4):
+                    return
+                # 逐字母声母约定(initial_words 构建同款): zh→z 即 p[0]
+                ini = "".join(p[0] for p in parts)
+                for w, wt, py in self.initial_words.get(ini, [])[:40]:
+                    if w in seen_w:
+                        continue
+                    syls = py.split(" ")
+                    if len(syls) != len(parts):
+                        continue
+                    ok = True
+                    for p, s in zip(parts, syls):
+                        # 全拼段须等于真音节; 缩写段=声母首字母,
+                        # zh/ch/sh 联合缩写匹配 zh 开头的音节
+                        if not (p == s or p == s[0]
+                                or (len(p) == 2 and s.startswith(p))):
+                            ok = False
+                            break
+                    if ok:
+                        seen_w.add(w)
+                        results.append((w, wt, len(syls), py, abbrevs))
+                return
+            rest = key[pos:]
+            # 声母缩写段: 1-2 字母(zh/ch/sh)
+            for ln in (2, 1):
+                if len(rest) >= ln:
+                    p = rest[:ln]
+                    if p in INITIALS:
+                        walk(pos + ln, parts + [p], abbrevs + 1)
+            # 全拼段: 该起点开始的合法音节
+            for ln in range(1, min(6, len(rest)) + 1):
+                p = rest[:ln]
+                if p in self.syl_set:
+                    walk(pos + ln, parts + [p], abbrevs)
+
+        walk(0, [], 0)
+        # DFS 序 ≠ 权重序: 按词权排序后再截断, 否则高权正解(用中文)会被截掉
+        results.sort(key=lambda x: -x[1])
+        return results
+
     def _build_edges(self, P):
         """edges_from[i] = [(end, text, score, kind)]。
 
@@ -286,6 +435,37 @@ class Engine:
                                 seen.add(ch)
                                 bucket.append((j, ch, self.log(wt) - self.char_penalty
                                                - self.fuzzy_penalty, "char", key))
+                # 纠错边(WowType 借鉴): 跨度本身不是合法音节时尝试四种
+                # 单次编辑(相邻键/换序/多按/漏按)。罚 typo_penalty; 分数
+                # 竞争上浮(门控在 decode)。扇出收敛: 每变体字≤6/词≤2,
+                # 变体≤3, 否则 k-best 枚举成本爆炸(实测 65ms→900ms)
+                if self.typo and 2 <= j - i <= 6 and key not in self.syl_set:
+                    for v in self._typo_variants(key):
+                        for ch, wt in self.pinyin_chars.get(v, [])[:6]:
+                            bucket.append((j, ch, self.log(wt) - self.char_penalty
+                                           - self.typo_penalty, "typo", v))
+                        for w, wt, nsyl, py in self._word_edges(v)[:2]:
+                            bucket.append((j, w, self.log(wt) + self.word_bonus * (nsyl - 1)
+                                           - self.char_penalty - self.typo_penalty, "typo", py))
+                # 省韵母混简拼词级边: 每段可打全拼或只打声母(kyi→可以)。
+                # 罚 每缩写段 mixed_penalty(末段缩写再+tail); 全拼可解析时
+                # decode 门控丢弃。限制跨度长度控成本
+                if self.mixed and 2 <= j - i <= 8 and key not in self.word_by_pinyin:
+                    for w, wt, nsyl, py, n_abbrev in self._mixed_word_edges(key)[:6]:
+                        pen = self.mixed_penalty * n_abbrev
+                        if j == n and n_abbrev == nsyl:
+                            pen += self.mixed_tail_penalty
+                        bucket.append((j, w, self.log(wt) + self.word_bonus * (nsyl - 1)
+                                       - self.char_penalty - pen, "abbrev", py))
+                # 省韵母单边: 声母缩写占位(k→可), 供单字路径拼合
+                if self.mixed and 1 <= j - i <= 2 and key in INITIALS \
+                        and key not in self.syl_set:
+                    ch, wt = self.initial_top_char.get(key, (None, 1))
+                    if ch:
+                        pen = self.mixed_penalty + \
+                            (self.mixed_tail_penalty if j == n else 0.0)
+                        bucket.append((j, ch, self.log(wt) - self.char_penalty
+                                       - pen, "abbrev", key))
             rem = P[i:]
             if len(rem) <= MAX_SPAN and rem not in self.word_by_pinyin:
                 for w, wt, nsyl, py in self._prefix_words(rem)[:wcap]:
@@ -295,9 +475,34 @@ class Engine:
                     bucket.append((n, ch, self.log(wt) - self.char_penalty
                                    - self.partial_penalty, "partial", key))
             if 2 <= len(rem) <= 8:
-                for w, wt in self.initial_words.get(rem, [])[:WORD_EDGE_CAP]:
+                # zh/ch/sh 当一个声母(WowType 借鉴): zhchi→支持(简拼键 zc)。
+                # 贪婪替换有误伤可能(如 zhang→zang), 加 0.5 罚分兜底
+                for alt, pen in ((rem, 0.0), (_unit_zh(rem), 0.5)):
+                    if alt == rem:
+                        continue
+                    for w, wt, py in self.initial_words.get(alt, [])[:WORD_EDGE_CAP]:
+                        bucket.append((n, w, self.log(wt) - self.char_penalty
+                                       - self.initial_penalty - pen, "initial", key))
+                for w, wt, py in self.initial_words.get(rem, [])[:WORD_EDGE_CAP]:
                     bucket.append((n, w, self.log(wt) - self.char_penalty
                                    - self.initial_penalty, "initial", key))
+        # 同 (终点, 文本) 去重: 纠错/混简拼的多来源重复条目既浪费 k-best
+        # 归并预算(同文本重复项挤占去重配额, 深位候选先拿会丢)又拖慢。
+        # clean 边(非 typo/abbrev)优先保留——否则门控会把被折叠的干净
+        # 读法一起丢掉(zg 的"中国"曾因此消失)
+        for i, bucket in enumerate(edges_from):
+            if len(bucket) > 1:
+                best_clean, best_bad = {}, {}
+                for e in bucket:
+                    k = (e[0], e[1])
+                    if e[3] in ("typo", "abbrev"):
+                        if k not in best_bad or e[2] > best_bad[k][2]:
+                            best_bad[k] = e
+                    elif k not in best_clean or e[2] > best_clean[k][2]:
+                        best_clean[k] = e
+                merged = list(best_clean.values()) + [
+                    v for k, v in best_bad.items() if k not in best_clean]
+                edges_from[i] = sorted(merged, key=lambda e: -e[2])
         return edges_from
 
     # ---------- 解码 ----------
@@ -363,45 +568,118 @@ class Engine:
         # 路径枚举深度: 200 为实测平衡点——词表外两字组合(先拿@167)
         # 可达列表深位(配合逐字组词+合成词学习), 整句解码 ~21ms
         beam = 200
-        paths = [[] for _ in range(n + 1)]   # paths[j] = [(score, edges)]
-        paths[0] = [(0.0, ())]
+        # 双池 k-best(WowType 借鉴的配套改造): clean 池(无纠错/混简拼边,
+        # beam 200, 语义与旧单池完全一致) + bad 池(含纠错/混简拼边, beam 50)。
+        # 旧单池方案里 typo/abbrev 路径会把 clean 深位候选(先拿@167)挤出
+        # beam, 而它们多数最终被门控丢弃——分池后互不挤占
+        edges_by_end = [[] for _ in range(n + 1)]
+        for i in range(n):
+            for edge in edges_from[i]:
+                edges_by_end[edge[0]].append((i, edge))
+        paths_clean = [[] for _ in range(n + 1)]
+        paths_bad = [[] for _ in range(n + 1)]
+        paths_clean[0] = [(0.0, ())]
         for j in range(1, n + 1):
-            merged = []
-            for i in range(j):
-                src = paths[i]
-                if not src:
+            incoming = edges_by_end[j]
+            if not incoming:
+                continue
+            streams_clean, streams_bad = [], []
+            for i, (end, text, score, kind, syls) in incoming:
+                bad_edge = kind in ("typo", "abbrev")
+                sc = _edge_stream(paths_clean[i], text, end, kind, syls, score)
+                sb = _edge_stream(paths_bad[i], text, end, kind, syls, score)
+                if bad_edge:
+                    streams_bad.append(sc)
+                    streams_bad.append(sb)
+                else:
+                    streams_clean.append(sc)
+                    streams_bad.append(sb)
+            for pools, streams, cap in ((paths_clean, streams_clean, beam),
+                                        (paths_bad, streams_bad, 50)):
+                if not streams:
                     continue
-                for end, text, score, kind, syls in edges_from[i]:
-                    if end != j:
+                seen = set()
+                cnt = 0
+                for item in heapq.merge(*streams, key=lambda x: -x[0]):
+                    key = "".join(t for t, _, _, _ in item[1])
+                    if key in seen:
                         continue
-                    for sc, edges in src:
-                        merged.append((sc + score, edges + ((text, end, kind, syls),)))
-            merged.sort(key=lambda x: -x[0])
-            seen = set()
-            for item in merged:
-                key = "".join(t for t, _, _, _ in item[1])
-                if key in seen:
-                    continue
-                seen.add(key)
-                paths[j].append(item)
-                if len(paths[j]) >= beam:
-                    break
+                    seen.add(key)
+                    pools[j].append(item)
+                    cnt += 1
+                    if cnt >= cap:
+                        break
+            if __import__('os').environ.get('IRIS_DBG'):
+                print(f"[dbg] pos {j}: clean={len(paths_clean[j])} "
+                      f"bad={len(paths_bad[j])}")
 
         # 候选 = 完整读法(整条上屏语义): 每条 k-best 路径就是一个候选,
         # 药丸显示完整读法, 选中即整条上屏(词表外组合如"硬编"一次选中)。
         # 候选不限量, 不设同首段配额——配额是"27 槽"时代的产物, 会把
         # 用户想要的低频读法(硬编)按纯词频挤掉; 翻页可达全部读法。
+        # 门控(WowType 借鉴): 存在零纠错全解析路径时, 含纠错路径整体排后
+        # (只有纠错才能解析的输入它们才浮上来); 存在全拼全解析路径时,
+        # 省韵母混简拼路径直接丢弃(正确输入零影响)。
         entries = []
-        for sc, edges in paths[target]:
+        for sc, edges in (paths_clean[target] + paths_bad[target]):
             preview = "".join(t for t, _, _, _ in edges)
             pinyin = "'".join(" ".join(s for _, _, _, s in edges).split())
-            entries.append((sc, preview, edges[0][2], pinyin, len(edges)))
+            n_typo = sum(1 for e in edges if e[2] == "typo")
+            n_abbrev = sum(1 for e in edges if e[2] == "abbrev")
+            n_initial = sum(1 for e in edges if e[2] == "initial")
+            entries.append((sc, preview, edges[0][2], pinyin, len(edges),
+                            n_typo, n_abbrev, n_initial, edges))
         entries.sort(key=lambda e: -e[0])
+        # 全拼解析 = 无纠错/混简拼/简拼边(补全算词典应答, 不算)——
+        # 简拼(作为儿女)是预测性读法, 它的存在不代表全拼走通了
+        full_entries = [e for e in entries
+                        if e[5] == 0 and e[6] == 0 and e[7] == 0]
+        clean_entries = [e for e in entries if e[5] == 0 and e[6] == 0]
+        best_clean = clean_entries[0][0] if clean_entries else None
+        # 纠错路径按分竞争(WowType"纠错后明显更常见"条款): 分数不低于
+        # 干净最优 -12 nat 的纠错读法按分混排(多按一字母 nihaoo→你好 这类
+        # 字面合法但语义垃圾的解析会被纠错正解压过); 明显更差的排到最后,
+        # 正确输入(无纠错边生成)不受任何影响
+        typo_all = [e for e in entries if e[5] > 0 and e[6] == 0]
+        typo_keep = [e for e in typo_all
+                     if best_clean is None or e[0] >= best_clean - 12.0]
+        typo_back = [e for e in typo_all if e not in typo_keep]
+        # 省韵母混简拼门控: 只有存在全拼全解析路径时才丢混简拼——
+        # 简拼/预测性读法(kind initial, 如 yongzwen 的"作为儿女")不算
+        # 全拼走通, 混简拼按分正当竞争
+        if full_entries:
+            best_full = full_entries[0][0]
+            typo_keep = [e for e in typo_keep if e[0] >= best_full - 12.0]
+            # 多按前缀规则挂到全拼读法上
+            pending = {}
+            for te in typo_keep:
+                for fe in full_entries[:60]:
+                    if len(te[1]) < len(fe[1]) and fe[1].startswith(te[1]):
+                        pending.setdefault(fe[1], []).append(te)
+                        break
+            # 只丢混简拼(e[6]>0); 简拼/纠错/其余 clean 读法按分保留——
+            # 否则 initial 类读法(女孩/你好)会被整体丢掉
+            keep = [e for e in entries
+                    if e[6] == 0 and (e[5] == 0 or e in typo_keep)]
+            emitted = set()
+            ordered = []
+            for e in sorted(keep, key=lambda e: -e[0]):
+                for te in pending.get(e[1], []):
+                    if te[1] not in emitted:
+                        ordered.append(te)
+                        emitted.add(te[1])
+                if e[1] not in emitted:
+                    ordered.append(e)
+                    emitted.add(e[1])
+            ordered += [e for e in typo_all if e not in typo_keep]
+        else:
+            # 全拼走不通: 纠错/混简拼/简拼读法按分竞争, 全保留
+            ordered = entries
         seen = set()
         if __import__('os').environ.get('IRIS_DBG'):
             hit = [(i+1, round(e[0], 2)) for i, e in enumerate(entries) if e[1] == '先拿']
             print(f"[dbg] entries={len(entries)} 先拿: {hit or '不在'}")
-        for sc, preview, kind, pinyin, n_edges in entries:
+        for sc, preview, kind, pinyin, n_edges, *_ in ordered:
             if preview in seen:
                 continue
             seen.add(preview)
@@ -411,8 +689,50 @@ class Engine:
                           single_word=(n_edges == 1 and kind in ("word", "char"))))
             if len(result.candidates) >= MAX_CANDIDATES:
                 break
+
+        # 神经重排只作用于中文整句读法; 句首词/英文在重排后定位插入
         if rerank and self.reranker is not None and result.remainder == "":
             self._apply_rerank(result, n, context)
+
+        cands = result.candidates
+        if cands:
+            # 句首词(WowType 借鉴): 长输入第二位放整句开头最长段
+            # (我今天晚上要加班 → 我今天晚上), 选中只上屏这一段、
+            # 余下拼音留在缓冲继续
+            top_edges = ordered[0][8] if ordered else ()
+            if n >= 8 and len(top_edges) >= 2:
+                # 累积到 4 个音节或 10 字母为止(WowType: 整句开头最长段)
+                tot, texts, syls, nsyl = 0, [], [], 0
+                for t, end, _k, s in top_edges[:5]:
+                    texts.append(t)
+                    syls.append(s)
+                    tot = end
+                    nsyl += 1
+                    if nsyl >= 4 or tot >= 10:
+                        break
+                if 0 < tot < n:
+                    head = "".join(texts)
+                    if head not in seen and head != cands[0].preview:
+                        cands.insert(1, Candidate(
+                            text=head, commit_end=tot, preview=head,
+                            score=ordered[0][0] - 0.1,
+                            kind=top_edges[0][2], single_word=False,
+                            pinyin="'".join(" ".join(syls).split())))
+            # 英文混打: 词表命中按规范写法给候选(WowType 借鉴)——
+            # 输入无干净全拼解析时排第一, 有则排第 6(前 5 留给中文)
+            ew = self.english.get(P)
+            if ew:
+                pos = 5 if clean_entries else 0
+                pos = min(pos, len(cands))
+                if ew not in [c.preview for c in cands[:pos + 1]]:
+                    cands.insert(pos, Candidate(
+                        text=ew, commit_end=n, preview=ew, score=0.0,
+                        kind="english", single_word=False))
+            elif result.remainder:
+                # 未登录串: 原样作为候选兜底(能选中上屏)
+                cands.append(Candidate(
+                    text=P, commit_end=n, preview=P, score=float("-inf") + 1,
+                    kind="english", single_word=False))
         return result
 
     def rerank_candidates(self, result, context):

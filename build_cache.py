@@ -201,7 +201,9 @@ def main():
         if not (2 <= n <= MAX_INITIALS_WORD_LEN):
             continue
         initials = "".join(s[0] for s in syls)
-        initial_words.setdefault(initials, []).append((word, max(w, 1)))
+        # py 一并存储: 省韵母混简拼的词级校验(全拼段必须等于真音节)
+        initial_words.setdefault(initials, []).append(
+            (word, max(w, 1), " ".join(syls)))
     for key, lst in initial_words.items():
         lst.sort(key=lambda x: -x[1])
         if len(lst) > MAX_PER_INITIALS:

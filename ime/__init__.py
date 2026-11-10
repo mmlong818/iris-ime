@@ -1,6 +1,6 @@
 """鸢尾输入法 (Iris IME): 解码引擎 + 神经重排 + 桌面客户端。"""
 
-__version__ = "2.1.0-alpha.18"
+__version__ = "2.1.0-alpha.19"
 
 from .engine import Candidate, DecodeResult, Engine
 
