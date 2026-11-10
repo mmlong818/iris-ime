@@ -22,3 +22,5 @@ ts/*/build.log
 *.spec
 tsf/*.exe
 tsft/*.exe
+models/sensevoice-onnx/model_quant.onnx
+models/sensevoice-onnx/model.onnx
