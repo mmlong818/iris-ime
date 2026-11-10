@@ -105,6 +105,22 @@ class WinClient(GlobalIme):
         except Exception as exc:
             print(f"[client] 语音子系统不可用(打包版首期未内置): {exc}",
                   file=sys.stderr)
+            try:
+                with open(app_data_dir() / "hook_errors.log", "a",
+                          encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") +
+                            "[voice] 子系统加载失败: " +
+                            repr(exc) + "\n")
+            except OSError:
+                pass
+        else:
+            try:
+                with open(app_data_dir() / "hook_errors.log", "a",
+                          encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%d %H:%M:%S ") +
+                            "[voice] 子系统加载成功\n")
+            except OSError:
+                pass
         self.model_name = "4M"
         self.stats_win = None
         self.icon = None  # 由 _init_tray 创建
@@ -228,11 +244,22 @@ class WinClient(GlobalIme):
 
     def _show_voice_settings_inner(self):
         import tkinter as tk
+        import ctypes
         if self.voice_win is not None:
             self.voice_win.destroy()
         win = self.voice_win = tk_toplevel(self.root)
         win.title("鸢尾输入法 · 语音设置")
         win.geometry("520x260")
+        # 多屏: 弹在鼠标所在屏幕中央(默认级联位置可能落到副屏/屏外)
+        try:
+            pt = ctypes.wintypes.POINT()
+            ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+            win.update_idletasks()
+            x = max(0, pt.x - 260)
+            y = max(0, pt.y - 130)
+            win.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
         llm = self.vcfg.llm
         rows = [
             ("润色模型 base_url", "base_url", llm.get("base_url", "")),
