@@ -701,14 +701,16 @@ class Engine:
             # 余下拼音留在缓冲继续
             top_edges = ordered[0][8] if ordered else ()
             if n >= 8 and len(top_edges) >= 2:
-                # 累积到 4 个音节或 10 字母为止(WowType: 整句开头最长段)
+                # 句首词 = 整句开头到第一个多字词边界(网易叭哥说→网易,
+                # 我今天晚上要加班→我今天晚上): 累积到 4 音节, 遇多字词
+                # (nsyl≥2)即停——OOV 长串不把噪声尾巴带上
                 tot, texts, syls, nsyl = 0, [], [], 0
                 for t, end, _k, s in top_edges[:5]:
                     texts.append(t)
                     syls.append(s)
                     tot = end
-                    nsyl += 1
-                    if nsyl >= 4 or tot >= 10:
+                    nsyl += s.count(" ") + 1
+                    if nsyl >= 4 or tot >= 10 or s.count(" ") >= 1:
                         break
                 if 0 < tot < n:
                     head = "".join(texts)
