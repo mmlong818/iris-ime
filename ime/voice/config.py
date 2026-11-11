@@ -57,6 +57,7 @@ DEFAULTS = {
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "api_key": "",
         "model": "glm-4-flash",
+        "polish": True,   # 润色开关: 关闭=松手直出转写稿(最快)
         "timeout": 20,
         "temperature": 0.2,
     },
@@ -157,3 +158,7 @@ class VoiceConfig:
 
     def llm_ready(self):
         return bool(self.llm.get("api_key"))
+
+    def polish_enabled(self):
+        """润色开关: 关闭时松手直出转写稿(最快路径), 纠错表仍然生效。"""
+        return bool(self.llm.get("polish", True))

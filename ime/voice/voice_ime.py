@@ -88,12 +88,14 @@ class VoiceIme:
 
     def _run(self, wav, mode="dictate", exe=None):
         raw = ""
+        t0 = time.monotonic()
         try:
             raw = self.asr.transcribe(wav)
         except Exception as exc:
             self._busy = False
             self._set("error", {"message": f"识别失败: {exc}"})
             return
+        asr_ms = int((time.monotonic() - t0) * 1000)
         if not raw:
             self._busy = False
             self._set("idle")
@@ -104,8 +106,9 @@ class VoiceIme:
         profile = detect_profile(exe, self.cfg)
         hotwords = self.cfg.hotwords
         self._set("polishing", {"raw": raw, "mode": mode})
+        t1 = time.monotonic()
         text, note = raw, ""
-        if self.cfg.llm_ready():
+        if self.cfg.llm_ready() and self.cfg.polish_enabled():
             try:
                 if mode == "translate":
                     text = self.polisher.translate(raw, hotwords=hotwords)
@@ -116,15 +119,16 @@ class VoiceIme:
                 text = raw        # 兜底: 润色失败出原文, 绝不空手
                 if mode == "translate":
                     note = "直译失败, 已出中文原文"
-        elif mode == "translate":
-            note = "直译需要先配 API Key, 已出中文原文"
+        polish_ms = int((time.monotonic() - t1) * 1000)
+        self.asr_ms, self.polish_ms = asr_ms, polish_ms
         if not text:
             text = raw
         self.last_meta = {
             "mode": mode, "profile": profile, "exe": exe,
             # 译文按目标应用换行; 风格规则只用于听写
             "newline": PROFILE_NEWLINE.get(profile, "enter")}
-        self._append_history(wav, raw, text, mode, profile, exe)
+        self._append_history(wav, raw, text, mode, profile, exe,
+                             asr_ms=asr_ms, polish_ms=polish_ms)
         self._busy = False
         if self.on_output:
             self.on_output(text, raw)
@@ -142,12 +146,14 @@ class VoiceIme:
             self.on_state(state, info or {})
 
     def _append_history(self, wav, raw, text, mode="dictate",
-                        profile="default", exe=None):
+                        profile="default", exe=None, asr_ms=None,
+                        polish_ms=None):
         try:
             self.history_dir.mkdir(parents=True, exist_ok=True)
             rec = {"ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                    "wav": str(wav), "raw": raw, "text": text,
-                   "mode": mode, "profile": profile, "exe": exe}
+                   "mode": mode, "profile": profile, "exe": exe,
+                   "asr_ms": asr_ms, "polish_ms": polish_ms}
             with open(self.history_dir / f"{datetime.now():%Y%m}.jsonl", "a",
                       encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
