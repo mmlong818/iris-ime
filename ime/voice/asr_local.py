@@ -24,6 +24,10 @@ class LocalASR:
         self.last_error = ""   # 各后端失败现场(_ensure 抛错时可见)
         self._lock = threading.Lock()
 
+    @property
+    def ready(self):
+        return self._model is not None
+
     # ---- torch 后端 ----
 
     def _try_torch(self):
@@ -70,7 +74,8 @@ class LocalASR:
         # quantize=True: int8 量化模型, CPU 上快且体积减半
         d = self._onnx_dir()
         if d:
-            self._model = SenseVoiceSmall(model_dir=str(d), quantize=True)
+            self._model = SenseVoiceSmall(model_dir=str(d), quantize=True,
+                                      intra_op_num_threads=8)
         else:
             from modelscope import snapshot_download
             path = snapshot_download(

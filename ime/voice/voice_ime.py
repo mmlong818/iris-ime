@@ -70,6 +70,8 @@ class VoiceIme:
             self._set("idle")
             return
         self._busy = True
+        if not self.asr.ready:
+            self._set("loading_model", {"message": "语音模型加载中(每次启动首次约 10-20 秒)"})
         self._set("transcribing", {"wav": str(wav)})
         threading.Thread(target=self._run, args=(wav, self._mode, self._exe),
                          daemon=True, name="iris-voice").start()

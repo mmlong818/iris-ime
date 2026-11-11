@@ -903,7 +903,10 @@ class GlobalIme:
         if self.last_fg_app and self.last_fg_app in self.state.get("passthrough", ()):
             mode += f" · {self.last_fg_app} 直通"
         vs = self.state.get("voice_state")
-        if vs in ("recording", "transcribing", "polishing"):
+        if vs == "loading_model":
+            mode += (" · ⏳ " + self.state.get("voice_info", {}).get(
+                "message", "语音模型加载中"))
+        elif vs in ("recording", "transcribing", "polishing"):
             label = {"recording": "🎤 录音中", "transcribing": "识别中",
                      "polishing": "润色中"}[vs]
             if self.state.get("voice_mode") == "translate":
