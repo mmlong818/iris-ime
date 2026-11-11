@@ -161,6 +161,11 @@ class WinClient(GlobalIme):
                                                        self.vcfg.enabled)),
             pystray.MenuItem("语音设置…", self._menu_voice_settings,
                              enabled=lambda item: self.voice is not None),
+            pystray.MenuItem("语音润色",
+                             self._menu_polish,
+                             enabled=lambda item: self.voice is not None,
+                             checked=lambda item: bool(self.voice and
+                                 self.vcfg.llm.get("polish", True))),
             pystray.MenuItem(
                 lambda item: ("直通: " + (self.last_fg_app or "切到目标应用后点这里")),
                 self._menu_passthrough,
@@ -307,12 +312,18 @@ class WinClient(GlobalIme):
                            "应用感知与纠错表在 voice.json 的 profiles / corrections 里改",
                  font=("Microsoft YaHei UI", 9), fg="#8a94a3", bg="#20242c",
                  justify="left", anchor="w").pack(fill="x", padx=12, pady=(8, 0))
+        polish_var = tk.BooleanVar(win, value=bool(self.vcfg.llm.get("polish", True)))
+        tk.Checkbutton(win, text="启用润色(去口头禅/整理格式; 关闭=松手直出转写稿最快)",
+                       variable=polish_var, bg="#20242c", fg="#e8eaee",
+                       activebackground="#20242c", selectcolor="#2b323d",
+                       relief="flat").pack(anchor="w", padx=12, pady=2)
         status = tk.Label(win, text="", fg="#8b7cf0", bg="#20242c")
         status.pack(fill="x", padx=12, pady=4)
 
         def save():
             for key, e in entries.items():
                 self.vcfg.llm[key] = e.get().strip()
+            self.vcfg.llm["polish"] = bool(polish_var.get())
             import re
             self.vcfg.asr["hotwords"] = [
                 w for w in re.split(r"[,，、;；\s]+", hot.get()) if w]
@@ -324,6 +335,10 @@ class WinClient(GlobalIme):
                               else "Key 为空: 润色关闭, 松手直出转写稿"))
         tk.Button(win, text="保存", command=save,
                   bg="#8b7cf0", fg="#191236", relief="flat").pack(pady=6)
+
+    def _menu_polish(self, icon, item):
+        if self.voice:
+            self.events.put(("polish", None, ""))
 
     def _menu_passthrough(self, icon, item):
         """把最近前台应用加入/移出直通白名单(远程桌面等转发键盘的应用)。"""
@@ -419,6 +434,9 @@ class WinClient(GlobalIme):
                         self.state["buffer"] = self.controller.buffer
                 elif kind == "voice":
                     self._apply_voice_toggle()
+                elif kind == "polish":
+                    self.vcfg.llm["polish"] = not self.vcfg.llm.get("polish", True)
+                    self.vcfg.save()
                 elif kind == "voice_settings":
                     self._show_voice_settings()
                 elif kind == "voice_ptt_down":
