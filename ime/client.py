@@ -80,12 +80,16 @@ def tray_image(engaged=False):
 
 class WinClient(GlobalIme):
     def __init__(self):
-        self.settings = {"fuzzy": True, "passthrough": [], **load_settings()}
+        self.settings = {"fuzzy": True, "passthrough": [], "enabled": False,
+                         **load_settings()}
         super().__init__(user_path=app_data_dir() / "user_words.json",
                          ui_settings_path=app_data_dir() / "ui.json",
                          fuzzy=self.settings.get("fuzzy", True),
                          error_log_path=app_data_dir() / "hook_errors.log")
         self.state["passthrough"] = set(self.settings.get("passthrough", []))
+        # 中/英开关持久化: 重启后恢复上次状态(不必每次 Ctrl+Alt+P)
+        self.state["enabled"] = bool(self.settings.get("enabled", False))
+        self._saved_enabled = self.state["enabled"]
         # 语音输入(v2.1): FunASR 本地转写 + GLM 润色; PTT 默认右 Ctrl。
         # 依赖 funasr/torch(数 GB), 打包版首期不带——缺失时优雅降级,
         # 菜单置灰, 其余功能不受影响
@@ -448,6 +452,11 @@ class WinClient(GlobalIme):
             self.icon.icon = tray_image(self.state["enabled"])
             if toggled:
                 self.icon.update_menu()
+            # 开关状态变化 → 落盘(钩子直接翻转 state, 这里只负责持久化)
+            if self.state["enabled"] != self._saved_enabled:
+                self._saved_enabled = self.state["enabled"]
+                self.settings["enabled"] = self._saved_enabled
+                save_settings(self.settings)
         self.controller.settle_rerank()
         self.controller.poll_rerank()  # 后台重排算完且缓冲未变 → 换头
         self._render()
