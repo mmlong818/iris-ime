@@ -763,6 +763,11 @@ class Engine:
                 return True
             return c.preview in key_words
 
+        # 只考虑完整读法: 句首词(部分上屏, commit_end < target)不是
+        # 整句读法, 字级 LM 会偏爱它的短前缀而误换头
+        cands = [c for c in cands if c.commit_end == result.consumed]
+        if not cands:
+            return None
         top_sc = cands[0].score
         cands = [c for c in cands if c.score >= top_sc - 12.0] or cands[:9]
         facts = [(c.kind != "initial", trusted(c)) for c in cands]

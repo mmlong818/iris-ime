@@ -121,6 +121,8 @@ class VoiceIme:
                 text = raw        # 兜底: 润色失败出原文, 绝不空手
                 if mode == "translate":
                     note = "直译失败, 已出中文原文"
+        elif mode == "translate":
+            note = "直译需要先配 API Key, 已出中文原文"
         polish_ms = int((time.monotonic() - t1) * 1000)
         self.asr_ms, self.polish_ms = asr_ms, polish_ms
         if not text:
