@@ -125,6 +125,23 @@ class LocalASR:
         return _TAG.sub("", text).strip()
 
     def preload(self):
-        """托盘开启语音时后台预热, 松手首句不用等模型下载。"""
-        threading.Thread(target=self._ensure, daemon=True,
+        """托盘开启语音时后台预热: 加载模型 + 用静音跑一次推理
+        (onnx 会话首次推理有 ~3s 预热), 之后首句即满速。"""
+        def warm():
+            try:
+                self._ensure()
+                import numpy as np
+                import wave, tempfile, os
+                path = os.path.join(tempfile.gettempdir(), "iris_asr_warm.wav")
+                if not os.path.exists(path):
+                    with wave.open(path, "wb") as w:
+                        w.setnchannels(1)
+                        w.setsampwidth(2)
+                        w.setframerate(16000)
+                        w.writeframes(np.zeros(8000, dtype=np.int16).tobytes())
+                self.transcribe(path)
+                self._warm = True
+            except Exception:
+                pass   # 预热失败不打扰: 首句仍会走加载/预热路径
+        threading.Thread(target=warm, daemon=True,
                          name="iris-asr-preload").start()
